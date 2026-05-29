@@ -36,12 +36,6 @@ def _media_root() -> Path:
     return Path(__file__).resolve().parents[3] / 'media'
 
 
-def _assignment_images_dir() -> Path:
-    target = _media_root() / ASSIGNMENT_IMAGES_SUBDIR
-    target.mkdir(parents=True, exist_ok=True)
-    return target
-
-
 # Pre-curated palette: deterministic per assignment, stable across reseeds.
 _PALETTE = (
     ('#0EA5E9', '#0369A1'),
@@ -112,18 +106,21 @@ def render_assignment_placeholder_svg(title: str, *, seed: str | None = None) ->
     return svg.encode('utf-8')
 
 
-def _store_bytes(payload: bytes, *, suffix: str) -> tuple[str, str, int]:
-    """Write payload to assignment-images dir under sha256.<suffix>; idempotent."""
+def _store_bytes(
+    payload: bytes, *, suffix: str, subdir: str = ASSIGNMENT_IMAGES_SUBDIR
+) -> tuple[str, str, int]:
+    """Write payload under `<subdir>/sha256.<suffix>`; idempotent."""
     digest = hashlib.sha256(payload).hexdigest()
-    dest_dir = _assignment_images_dir()
+    dest_dir = _media_root() / subdir
+    dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f'{digest}.{suffix}'
     if not dest.exists():
         dest.write_bytes(payload)
-    relative = f'{ASSIGNMENT_IMAGES_SUBDIR}/{digest}.{suffix}'
+    relative = f'{subdir}/{digest}.{suffix}'
     return digest, relative, len(payload)
 
 
-def _existing_asset_by_sha(digest: str) -> MediaAsset | None:
+def _existing_asset_by_sha256(digest: str) -> MediaAsset | None:
     return MediaAsset.query.filter_by(sha256=digest).first()
 
 
@@ -131,10 +128,10 @@ def create_or_reuse_svg_placeholder(*, title: str, seed: str | None = None) -> M
     """Return an existing MediaAsset row for the same content, otherwise persist a new one."""
     payload = render_assignment_placeholder_svg(title, seed=seed)
     digest = hashlib.sha256(payload).hexdigest()
-    existing = _existing_asset_by_sha(digest)
+    existing = _existing_asset_by_sha256(digest)
     if existing is not None:
         return existing
-    digest_dup, relative, byte_size = _store_bytes(payload, suffix='svg')
+    digest_dup, relative, byte_size = _store_bytes(payload, suffix='svg', subdir=ASSIGNMENT_IMAGES_SUBDIR)
     assert digest == digest_dup
     asset = MediaAsset(
         kind=MEDIA_KIND_ASSIGNMENT_COVER,
@@ -155,8 +152,8 @@ def store_uploaded_image(
     *, payload: bytes, fmt: str, width: int | None, height: int | None, uploaded_by_id: int | None
 ) -> MediaAsset:
     """Persist a pre-validated raster image (caller must have already re-encoded it)."""
-    digest, relative, byte_size = _store_bytes(payload, suffix=fmt)
-    existing = _existing_asset_by_sha(digest)
+    digest, relative, byte_size = _store_bytes(payload, suffix=fmt, subdir=ASSIGNMENT_IMAGES_SUBDIR)
+    existing = _existing_asset_by_sha256(digest)
     if existing is not None:
         return existing
     asset = MediaAsset(
@@ -186,18 +183,8 @@ class ImageValidationError(ValueError):
     """Raised when an uploaded image fails any defense-in-depth check."""
 
 
-def reencode_uploaded_image(
-    raw_bytes: bytes, *, uploaded_by_id: int | None
-) -> MediaAsset:
-    """Validate + re-encode an uploaded raster image and persist it as a MediaAsset.
-
-    Validation order matters:
-      1. Byte budget (cheap, blocks decompression bombs at the entry).
-      2. Pillow open + verify (rejects malformed / non-image content).
-      3. Format whitelist (blocks SVG-as-XML, BMP-with-payload, etc).
-      4. Pixel budget (Pillow exposes (w, h) only after open).
-      5. Re-encode in a fresh decoder pass (drops EXIF + any embedded scripts).
-    """
+def _raster_bytes_to_webp_payload(raw_bytes: bytes) -> tuple[bytes, int, int]:
+    """Validate raster input and return lossy WebP bytes plus dimensions."""
     if not raw_bytes:
         raise ImageValidationError('Файл пустой.')
     if len(raw_bytes) > MAX_UPLOAD_BYTES:
@@ -205,7 +192,6 @@ def reencode_uploaded_image(
             f'Файл больше {MAX_UPLOAD_BYTES // (1024 * 1024)} МБ.'
         )
 
-    # Local import — Pillow is a heavy module, defer until first upload happens.
     from io import BytesIO
 
     try:
@@ -220,7 +206,7 @@ def reencode_uploaded_image(
     buffer = BytesIO(raw_bytes)
     try:
         with Image.open(buffer) as probe:
-            probe.verify()  # Pillow .verify() consumes the file pointer; reopen below.
+            probe.verify()
     except (UnidentifiedImageError, OSError) as exc:
         raise ImageValidationError('Не удалось распознать изображение.') from exc
     except Image.DecompressionBombError as exc:
@@ -239,13 +225,10 @@ def reencode_uploaded_image(
                 raise ImageValidationError('Некорректные размеры изображения.')
             if width * height > MAX_UPLOAD_PIXELS:
                 raise ImageValidationError('Слишком много пикселей в изображении.')
-            # Drop EXIF / metadata via the conversion + a clean save below.
             converted = img.convert('RGB')
             scale = min(1.0, MAX_OUTPUT_SIDE_PX / max(width, height))
             if scale < 1.0:
                 new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
-                # Pillow >=10 moved LANCZOS to Image.Resampling; keep a graceful fallback
-                # for older installs in case requirements drift.
                 resample = getattr(Image, 'Resampling', Image).LANCZOS
                 converted = converted.resize(new_size, resample)
             out_buffer = BytesIO()
@@ -257,6 +240,15 @@ def reencode_uploaded_image(
     except (OSError, ValueError) as exc:
         raise ImageValidationError('Не удалось обработать изображение.') from exc
 
+    return payload, final_width, final_height
+
+
+def reencode_uploaded_image(
+    raw_bytes: bytes, *, uploaded_by_id: int | None
+) -> MediaAsset:
+    """Validate + re-encode an uploaded raster image and persist as assignment-cover MediaAsset."""
+
+    payload, final_width, final_height = _raster_bytes_to_webp_payload(raw_bytes)
     return store_uploaded_image(
         payload=payload,
         fmt='webp',

@@ -227,3 +227,4 @@ class Config:
         default=True,
     )
     ENABLE_SITE_ACTIVITY_LOG = _as_bool(os.getenv('ENABLE_SITE_ACTIVITY_LOG'), default=True)
+    BUG_HUNTER_APPROVED_XP = max(0, int(_env('BUG_HUNTER_APPROVED_XP') or '40'))

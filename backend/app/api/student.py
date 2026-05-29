@@ -87,6 +87,7 @@ LESSON_PARTICIPANT_ROLES: list[UserRole] = [
     UserRole.ADMIN,
     UserRole.SUPERADMIN,
 ]
+_STAFF_LEADERBOARD_ROLES = frozenset({UserRole.ADMIN, UserRole.SUPERADMIN})
 _AGE_GROUP_RANK = {"junior": 0, "middle": 1, "senior": 2}
 LEADERBOARD_LIMIT = 50
 GLOBAL_LEADERBOARD_REFRESH_INTERVAL = timedelta(minutes=5)
@@ -177,6 +178,41 @@ def _leaderboard_row(student: User, position: int) -> dict:
         "level": student.level,
         "age_group": student.age_group,
     }
+
+
+def _attach_leaderboard_staff_fields(rows: list[dict], viewer: User) -> list[dict]:
+    """Добавляет email учеников в строки рейтинга только для админских ролей (кэш Redis не меняется)."""
+    if not rows or viewer.role not in _STAFF_LEADERBOARD_ROLES:
+        return rows
+    lookup: list[int] = []
+    seen: set[int] = set()
+    for row in rows:
+        sid = row.get("id")
+        if sid is None:
+            continue
+        try:
+            uid = int(sid)
+        except (TypeError, ValueError):
+            continue
+        if uid not in seen:
+            seen.add(uid)
+            lookup.append(uid)
+    if not lookup:
+        return rows
+    email_by_id = dict(
+        db.session.query(User.id, User.email).filter(User.id.in_(lookup)).all()
+    )
+    out: list[dict] = []
+    for row in rows:
+        r = dict(row)
+        sid = r.get("id")
+        if sid is not None:
+            try:
+                r["email"] = email_by_id.get(int(sid))
+            except (TypeError, ValueError):
+                r["email"] = None
+        out.append(r)
+    return out
 
 
 def _user_can_use_theme(user: User, theme: str) -> bool:
@@ -1121,22 +1157,34 @@ def leaderboard(current_user: User):
             selected_membership = memberships[0]
 
         classroom = selected_membership.classroom
+        lb_rows = _attach_leaderboard_staff_fields(
+            _class_leaderboard_rows(classroom.id),
+            current_user,
+        )
+        staff_lb = current_user.role in _STAFF_LEADERBOARD_ROLES
         return {
-            "leaderboard": _class_leaderboard_rows(classroom.id),
+            "leaderboard": lb_rows,
             "me": current_user.to_dict(),
             "classes": classes,
             "scope": "class",
             "classroom": classroom.to_dict(),
             "refresh_seconds": 0,
+            "staff_leaderboard": staff_lb,
         }
 
+    lb_rows = _attach_leaderboard_staff_fields(
+        _global_leaderboard_rows(age_group),
+        current_user,
+    )
+    staff_lb = current_user.role in _STAFF_LEADERBOARD_ROLES
     return {
-        "leaderboard": _global_leaderboard_rows(age_group),
+        "leaderboard": lb_rows,
         "me": current_user.to_dict(),
         "classes": classes,
         "scope": "global",
         "classroom": None,
         "refresh_seconds": int(GLOBAL_LEADERBOARD_REFRESH_INTERVAL.total_seconds()),
+        "staff_leaderboard": staff_lb,
     }
 
 

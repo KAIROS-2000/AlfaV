@@ -6,10 +6,19 @@ from ..core.db import db
 from ..core.security import auth_required
 from ..models.user import User, UserRole
 from ..services import support_tickets as svc
+from ..services import bug_hunter as bug_svc
+from ..services.assignment_images import ImageValidationError, MAX_UPLOAD_BYTES, reencode_uploaded_image
 
 support_bp = Blueprint("support", __name__)
 
 _TICKET_CREATORS = [UserRole.STUDENT, UserRole.TEACHER, UserRole.PARENT]
+_BUG_HUNTER_REPORTERS = [
+    UserRole.STUDENT,
+    UserRole.TEACHER,
+    UserRole.PARENT,
+    UserRole.ADMIN,
+    UserRole.SUPERADMIN,
+]
 _STAFF = [UserRole.ADMIN, UserRole.SUPERADMIN]
 
 
@@ -197,3 +206,94 @@ def staff_post_message(user: User, ticket_id: int):
             "updated_at": svc.iso_timestamp(ticket.updated_at),
         },
     }, 201
+
+
+@support_bp.post("/bug-reports")
+@auth_required(_BUG_HUNTER_REPORTERS)
+def create_bug_report(user: User):
+    description = request.form.get("description") or ""
+    reproduction_steps = request.form.get("reproduction_steps") or ""
+    user_journey_path = request.form.get("user_journey_path") or ""
+    screenshot_asset_id = None
+
+    upload = request.files.get("screenshot")
+    if upload is not None and upload.filename:
+        raw_bytes = upload.read()
+        if len(raw_bytes) > MAX_UPLOAD_BYTES:
+            return {'message': f'Скриншот больше {MAX_UPLOAD_BYTES // (1024 * 1024)} МБ.'}, 413
+        try:
+            asset = reencode_uploaded_image(raw_bytes, uploaded_by_id=user.id)
+        except ImageValidationError as exc:
+            return {'message': str(exc)}, 400
+        screenshot_asset_id = asset.id
+
+    payload, status = bug_svc.create_report(
+        user,
+        description=description,
+        reproduction_steps=reproduction_steps,
+        user_journey_path=user_journey_path,
+        screenshot_asset_id=screenshot_asset_id,
+    )
+    if status >= 400:
+        db.session.rollback()
+        return payload, status
+    db.session.commit()
+    return payload, status
+
+
+@support_bp.get("/bug-reports/me")
+@auth_required(_BUG_HUNTER_REPORTERS)
+def list_my_bug_reports(user: User):
+    return bug_svc.list_my_reports(user)
+
+
+@support_bp.get("/staff/bug-reports")
+@auth_required(_STAFF)
+def staff_list_bug_reports(_user: User):
+    st_raw = request.args.get("status")
+    status_filter = None if not st_raw or str(st_raw).strip() == '' else str(st_raw).strip()
+    limit = _safe_limit(request.args.get("limit"), default=80, maximum=200)
+    rows = bug_svc.staff_list_rows(status=status_filter, limit=limit)
+    return {
+        "reports": [r.to_dict(include_private=True) for r in rows],
+        "xp_reward_on_approval": bug_svc.get_bug_hunter_approved_xp(),
+    }
+
+
+@support_bp.get("/staff/bug-hunter/settings")
+@auth_required(_STAFF)
+def staff_get_bug_hunter_settings(_user: User):
+    return {
+        "approved_xp": bug_svc.get_bug_hunter_approved_xp(),
+        "max_xp": bug_svc.BUG_HUNTER_XP_MAX,
+    }
+
+
+@support_bp.patch("/staff/bug-hunter/settings")
+@auth_required(_STAFF)
+def staff_patch_bug_hunter_settings(_user: User):
+    data = request.get_json(silent=True) or {}
+    payload, status = bug_svc.set_bug_hunter_approved_xp(data.get("approved_xp"))
+    if status >= 400:
+        db.session.rollback()
+        return payload, status
+    db.session.commit()
+    return payload, status
+
+
+@support_bp.patch("/staff/bug-reports/<int:report_id>")
+@auth_required(_STAFF)
+def staff_moderate_bug_report(user: User, report_id: int):
+    data = request.get_json(silent=True) or {}
+    new_status = str(data.get("moderation_status") or "").strip().lower()
+    raw_note = data.get("moderator_note")
+    note_val = None if raw_note is None else str(raw_note)
+
+    payload, status = bug_svc.staff_moderate(
+        user, report_id, new_status=new_status, note=note_val
+    )
+    if status >= 400:
+        db.session.rollback()
+        return payload, status
+    db.session.commit()
+    return payload, status

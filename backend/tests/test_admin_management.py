@@ -1123,6 +1123,20 @@ class AdminManagementRegressionTests(unittest.TestCase):
         self.assertEqual(jd.get('snapshot_timezone'), 'browser_local')
         self.assertEqual(jd['items'][0]['action'], 'manual_test')
 
+        with app.test_client() as client:
+            self.login(client, 'manual-export@example.com', 'AdminPass123!')
+            listing = client.get('/api/admin/audit-log-archives')
+            self.assertEqual(listing.status_code, 200)
+            lj = listing.get_json() or {}
+            self.assertEqual(lj.get('manual_audit_snapshots'), ['2099-12-31_23-59-59'])
+            self.assertEqual(lj.get('manual_site_activity_snapshots'), ['2099-12-31_23-59-59'])
+            self.assertEqual(lj.get('dates'), [])
+            dl_a = client.get('/api/admin/manual-audit-log-archives/2099-12-31_23-59-59')
+            self.assertEqual(dl_a.status_code, 200)
+            self.assertIn('application/json', (dl_a.headers.get('Content-Type') or '').lower())
+            dl_s = client.get('/api/admin/manual-site-activity-log-archives/2099-12-31_23-59-59')
+            self.assertEqual(dl_s.status_code, 200)
+
     def test_manual_export_invalid_snapshot_key_falls_back_to_server_utc(self):
         app = self.create_app()
         archive_root = Path(self._tempdirs[-1].name) / 'manual_archives_fallback'

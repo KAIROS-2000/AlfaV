@@ -163,6 +163,55 @@ def resolve_site_activity_archive_file(archive_dir: Path, date_key: str) -> Path
     return candidate
 
 
+def list_manual_audit_snapshot_keys(archive_dir: Path) -> list[str]:
+    """Snapshot keys from immediate / manual exports (`admin_audit_manual_*.json`)."""
+    prefix = "admin_audit_manual_"
+    out: list[str] = []
+    for p in sorted(archive_dir.glob(f"{prefix}*.json"), key=lambda x: x.name, reverse=True):
+        stem = p.stem
+        if not stem.startswith(prefix):
+            continue
+        key = stem[len(prefix) :]
+        if sanitize_client_manual_snapshot_key(key):
+            out.append(key)
+    return out
+
+
+def list_manual_site_activity_snapshot_keys(archive_dir: Path) -> list[str]:
+    prefix = "site_activity_manual_"
+    out: list[str] = []
+    for p in sorted(archive_dir.glob(f"{prefix}*.json"), key=lambda x: x.name, reverse=True):
+        stem = p.stem
+        if not stem.startswith(prefix):
+            continue
+        key = stem[len(prefix) :]
+        if sanitize_client_manual_snapshot_key(key):
+            out.append(key)
+    return out
+
+
+def resolve_manual_audit_archive_file(archive_dir: Path, snapshot_key: str) -> Path | None:
+    approved = sanitize_client_manual_snapshot_key(snapshot_key)
+    if approved is None:
+        return None
+    base = archive_dir.resolve()
+    candidate = (base / f"admin_audit_manual_{approved}.json").resolve()
+    if candidate.parent != base:
+        return None
+    return candidate
+
+
+def resolve_manual_site_activity_archive_file(archive_dir: Path, snapshot_key: str) -> Path | None:
+    approved = sanitize_client_manual_snapshot_key(snapshot_key)
+    if approved is None:
+        return None
+    base = archive_dir.resolve()
+    candidate = (base / f"site_activity_manual_{approved}.json").resolve()
+    if candidate.parent != base:
+        return None
+    return candidate
+
+
 def _iter_admin_audit_export_dicts() -> Iterator[dict[str, Any]]:
     stmt = (
         select(AdminAuditLog)

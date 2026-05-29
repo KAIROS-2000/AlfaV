@@ -28,6 +28,51 @@ import type {
 } from '@/types'
 
 const DIRECTORY_PAGE_SIZE = 20
+
+type ArchivePick = { kind: 'daily' | 'manual'; value: string }
+
+function parseArchivePick(raw: string): ArchivePick | null {
+  if (!raw) return null
+  if (raw.startsWith('daily:')) {
+    const value = raw.slice(6)
+    return value ? { kind: 'daily', value } : null
+  }
+  if (raw.startsWith('manual:')) {
+    const value = raw.slice(7)
+    return value ? { kind: 'manual', value } : null
+  }
+  return null
+}
+
+function defaultAdminArchivePick(data: AdminAuditLogArchivesResponse): string {
+  const m = data.manual_audit_snapshots?.[0]
+  if (m) return `manual:${m}`
+  const d = data.dates?.[0]
+  if (d) return `daily:${d}`
+  return ''
+}
+
+function defaultSiteArchivePick(data: AdminAuditLogArchivesResponse): string {
+  const m = data.manual_site_activity_snapshots?.[0]
+  if (m) return `manual:${m}`
+  const d = data.site_activity_dates?.[0]
+  if (d) return `daily:${d}`
+  return ''
+}
+
+function adminArchivePickStillValid(pick: string, data: AdminAuditLogArchivesResponse): boolean {
+  const p = parseArchivePick(pick)
+  if (!p) return false
+  if (p.kind === 'daily') return data.dates.includes(p.value)
+  return Boolean(data.manual_audit_snapshots?.includes(p.value))
+}
+
+function siteArchivePickStillValid(pick: string, data: AdminAuditLogArchivesResponse): boolean {
+  const p = parseArchivePick(pick)
+  if (!p) return false
+  if (p.kind === 'daily') return Boolean(data.site_activity_dates?.includes(p.value))
+  return Boolean(data.manual_site_activity_snapshots?.includes(p.value))
+}
 type TeacherApprovalFilter = 'all' | TeacherApprovalStatus
 
 const STAT_LABELS: Record<string, string> = {
@@ -1354,9 +1399,11 @@ export function AdminAuditLogPanel({
   const [page, setPage] = useState(initialData?.pagination.page ?? 1)
   const [loading, setLoading] = useState(!initialData)
   const [archives, setArchives] = useState<AdminAuditLogArchivesResponse | null>(null)
-  const [archiveDate, setArchiveDate] = useState('')
+  const [adminArchivePick, setAdminArchivePick] = useState('')
+  const [siteArchivePick, setSiteArchivePick] = useState('')
   const [archivesLoading, setArchivesLoading] = useState(true)
-  const [archiveDownloadBusy, setArchiveDownloadBusy] = useState(false)
+  const [adminArchiveDownloadBusy, setAdminArchiveDownloadBusy] = useState(false)
+  const [siteArchiveDownloadBusy, setSiteArchiveDownloadBusy] = useState(false)
   const [manualExportBusy, setManualExportBusy] = useState(false)
   const skipInitialLoad = useRef(Boolean(initialData))
 
@@ -1379,7 +1426,12 @@ export function AdminAuditLogPanel({
       .then((data) => {
         if (cancelled) return
         setArchives(data)
-        setArchiveDate((prev) => (prev ? prev : data.dates[0] ?? ''))
+        setAdminArchivePick((prev) =>
+          prev && adminArchivePickStillValid(prev, data) ? prev : defaultAdminArchivePick(data),
+        )
+        setSiteArchivePick((prev) =>
+          prev && siteArchivePickStillValid(prev, data) ? prev : defaultSiteArchivePick(data),
+        )
       })
       .catch((error) => {
         showErrorToast(describeError(error, 'Не удалось загрузить список архивов.'))
@@ -1508,14 +1560,16 @@ export function AdminAuditLogPanel({
     return () => window.clearTimeout(timer)
   }, [action, actorRole, actorLogin, auditOrder, auditSort, initialData, page, target])
 
-  async function downloadAuditArchive() {
-    if (!archiveDate) return
-    setArchiveDownloadBusy(true)
+  async function downloadAdminAuditArchiveJson() {
+    const parsed = parseArchivePick(adminArchivePick)
+    if (!parsed) return
+    setAdminArchiveDownloadBusy(true)
     try {
-      const r = await fetch(
-        `${PUBLIC_API_URL}/admin/audit-log-archives/${encodeURIComponent(archiveDate)}`,
-        { credentials: 'same-origin', cache: 'no-store' },
-      )
+      const url =
+        parsed.kind === 'daily'
+          ? `${PUBLIC_API_URL}/admin/audit-log-archives/${encodeURIComponent(parsed.value)}`
+          : `${PUBLIC_API_URL}/admin/manual-audit-log-archives/${encodeURIComponent(parsed.value)}`
+      const r = await fetch(url, { credentials: 'same-origin', cache: 'no-store' })
       if (!r.ok) {
         const text = await r.text()
         let msg = 'Не удалось скачать архив.'
@@ -1528,17 +1582,59 @@ export function AdminAuditLogPanel({
         throw new Error(msg)
       }
       const blob = await r.blob()
-      const url = URL.createObjectURL(blob)
+      const blobUrl = URL.createObjectURL(blob)
       const a = document.createElement('a')
-      a.href = url
-      a.download = `admin_audit_${archiveDate}.json`
+      a.href = blobUrl
+      a.download =
+        parsed.kind === 'daily'
+          ? `admin_audit_${parsed.value}.json`
+          : `admin_audit_manual_${parsed.value}.json`
       a.rel = 'noopener'
       a.click()
-      URL.revokeObjectURL(url)
+      URL.revokeObjectURL(blobUrl)
     } catch (error) {
       showErrorToast(describeError(error, 'Не удалось скачать архив.'))
     } finally {
-      setArchiveDownloadBusy(false)
+      setAdminArchiveDownloadBusy(false)
+    }
+  }
+
+  async function downloadSiteActivityArchiveJson() {
+    const parsed = parseArchivePick(siteArchivePick)
+    if (!parsed) return
+    setSiteArchiveDownloadBusy(true)
+    try {
+      const url =
+        parsed.kind === 'daily'
+          ? `${PUBLIC_API_URL}/admin/site-activity-log-archives/${encodeURIComponent(parsed.value)}`
+          : `${PUBLIC_API_URL}/admin/manual-site-activity-log-archives/${encodeURIComponent(parsed.value)}`
+      const r = await fetch(url, { credentials: 'same-origin', cache: 'no-store' })
+      if (!r.ok) {
+        const text = await r.text()
+        let msg = 'Не удалось скачать архив журнала API.'
+        try {
+          const j = JSON.parse(text) as { message?: string }
+          if (j.message) msg = j.message
+        } catch {
+          /* ignore */
+        }
+        throw new Error(msg)
+      }
+      const blob = await r.blob()
+      const blobUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = blobUrl
+      a.download =
+        parsed.kind === 'daily'
+          ? `site_activity_${parsed.value}.json`
+          : `site_activity_manual_${parsed.value}.json`
+      a.rel = 'noopener'
+      a.click()
+      URL.revokeObjectURL(blobUrl)
+    } catch (error) {
+      showErrorToast(describeError(error, 'Не удалось скачать архив журнала API.'))
+    } finally {
+      setSiteArchiveDownloadBusy(false)
     }
   }
 
@@ -1574,6 +1670,18 @@ export function AdminAuditLogPanel({
           ? 'ваше локальное время'
           : 'время сервера (UTC)'
       showSuccessToast(`Снимок ${data.snapshot_key} (${tzHint}): ${parts.join('; ')}`)
+      try {
+        const listData = await api<AdminAuditLogArchivesResponse>(
+          '/admin/audit-log-archives',
+          undefined,
+          'required',
+        )
+        setArchives(listData)
+        if (a.status === 'ok') setAdminArchivePick(`manual:${data.snapshot_key}`)
+        if (s.status === 'ok') setSiteArchivePick(`manual:${data.snapshot_key}`)
+      } catch {
+        /* список архивов подтянется при следующем открытии страницы */
+      }
       setPage(1)
       void load({
         action,
@@ -1602,12 +1710,11 @@ export function AdminAuditLogPanel({
           <p className="brand-eyebrow">Архив</p>
           <h2 className="text-2xl font-black text-slate-900">Выгрузки по дням</h2>
           <p className="text-sm leading-7 text-slate-500">
-          По расписанию (по UTC) накопленные с прошлой выгрузки записи пишутся в JSON-файл по календарной дате в каталоге архива на сервере
+          По расписанию (по UTC) накопленные с прошлой выгрузки записи пишутся в JSON по календарной дате в каталоге архива на сервере
             (по умолчанию <code className="text-slate-600">/app/backend/logs/audit</code> в Docker; на вашем компьютере при стандартном{' '}
             <code className="text-slate-600">docker-compose</code> это папка проекта{' '}
             <code className="text-slate-600">backend/logs/audit</code>),
-            затем «горячая» таблица очищается. Ниже можно скачать файл по дате в имени. Досрочная выгрузка сохраняет
-            отдельные файлы по метке времени в вашей таймзоне браузера; ночное расписание не отменяется.
+            затем «горячая» таблица очищается. Досрочная выгрузка сохраняет отдельные файлы с меткой времени в имени — они появляются в списке «Досрочные снимки». Ночное расписание не отменяется.
             {archives && typeof archives.export_hour_utc === 'number' ? (
               <span> Плановый час (UTC) для встроенного планировщика: {archives.export_hour_utc}:00.</span>
             ) : null}
@@ -1615,33 +1722,108 @@ export function AdminAuditLogPanel({
         </div>
         <div className="mt-6 flex max-w-2xl flex-col gap-4 sm:flex-row sm:items-end">
           <label className="min-w-0 flex-1 space-y-2">
-            <span className="text-sm font-semibold text-slate-700">Дата файла</span>
+            <span className="text-sm font-semibold text-slate-700">Журнал админ-действий</span>
             <select
               className="w-full rounded-2xl border border-slate-200 px-4 py-3"
-              value={archiveDate}
-              onChange={(e) => setArchiveDate(e.target.value)}
+              value={adminArchivePick}
+              onChange={(e) => setAdminArchivePick(e.target.value)}
               disabled={archivesLoading}
             >
               {archivesLoading ? (
                 <option value="">Загрузка…</option>
-              ) : (archives?.dates.length ?? 0) === 0 ? (
+              ) : (archives?.manual_audit_snapshots?.length ?? 0) === 0 &&
+                (archives?.dates.length ?? 0) === 0 ? (
                 <option value="">Архивов пока нет</option>
               ) : (
-                (archives?.dates ?? []).map((d) => (
-                  <option key={d} value={d}>
-                    {d}
-                  </option>
-                ))
+                <>
+                  {(archives?.manual_audit_snapshots?.length ?? 0) > 0 ? (
+                    <optgroup label="Досрочные снимки">
+                      {(archives?.manual_audit_snapshots ?? []).map((k) => (
+                        <option key={`m:${k}`} value={`manual:${k}`}>
+                          {k}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : null}
+                  {(archives?.dates.length ?? 0) > 0 ? (
+                    <optgroup label="По дням (UTC)">
+                      {(archives?.dates ?? []).map((d) => (
+                        <option key={`d:${d}`} value={`daily:${d}`}>
+                          {d}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : null}
+                </>
               )}
             </select>
           </label>
           <button
             type="button"
             className="brand-button-primary h-[3.15rem] shrink-0 px-6 text-sm"
-            onClick={() => void downloadAuditArchive()}
-            disabled={!archiveDate || archiveDownloadBusy || archivesLoading}
+            onClick={() => void downloadAdminAuditArchiveJson()}
+            disabled={
+              !adminArchivePick ||
+              adminArchiveDownloadBusy ||
+              archivesLoading ||
+              ((archives?.manual_audit_snapshots?.length ?? 0) === 0 &&
+                (archives?.dates.length ?? 0) === 0)
+            }
           >
-            {archiveDownloadBusy ? 'Скачивание…' : 'Скачать JSON'}
+            {adminArchiveDownloadBusy ? 'Скачивание…' : 'Скачать JSON'}
+          </button>
+        </div>
+        <div className="mt-4 flex max-w-2xl flex-col gap-4 sm:flex-row sm:items-end">
+          <label className="min-w-0 flex-1 space-y-2">
+            <span className="text-sm font-semibold text-slate-700">Журнал API-запросов</span>
+            <select
+              className="w-full rounded-2xl border border-slate-200 px-4 py-3"
+              value={siteArchivePick}
+              onChange={(e) => setSiteArchivePick(e.target.value)}
+              disabled={archivesLoading}
+            >
+              {archivesLoading ? (
+                <option value="">Загрузка…</option>
+              ) : (archives?.manual_site_activity_snapshots?.length ?? 0) === 0 &&
+                (archives?.site_activity_dates?.length ?? 0) === 0 ? (
+                <option value="">Архивов пока нет</option>
+              ) : (
+                <>
+                  {(archives?.manual_site_activity_snapshots?.length ?? 0) > 0 ? (
+                    <optgroup label="Досрочные снимки">
+                      {(archives?.manual_site_activity_snapshots ?? []).map((k) => (
+                        <option key={`sm:${k}`} value={`manual:${k}`}>
+                          {k}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : null}
+                  {(archives?.site_activity_dates?.length ?? 0) > 0 ? (
+                    <optgroup label="По дням (UTC)">
+                      {(archives?.site_activity_dates ?? []).map((d) => (
+                        <option key={`sd:${d}`} value={`daily:${d}`}>
+                          {d}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : null}
+                </>
+              )}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="brand-button-primary h-[3.15rem] shrink-0 px-6 text-sm"
+            onClick={() => void downloadSiteActivityArchiveJson()}
+            disabled={
+              !siteArchivePick ||
+              siteArchiveDownloadBusy ||
+              archivesLoading ||
+              ((archives?.manual_site_activity_snapshots?.length ?? 0) === 0 &&
+                (archives?.site_activity_dates?.length ?? 0) === 0)
+            }
+          >
+            {siteArchiveDownloadBusy ? 'Скачивание…' : 'Скачать JSON'}
           </button>
         </div>
         <div className="mt-8 flex flex-col gap-4 border-t border-slate-200 pt-6 sm:flex-row sm:flex-wrap sm:items-center">

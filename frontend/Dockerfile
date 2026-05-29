@@ -30,6 +30,9 @@ ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 ENV INTERNAL_API_URL=$INTERNAL_API_URL
 
 COPY --from=deps /app/node_modules ./node_modules
+# CACHEBUST: change build-arg to force a fresh Next.js compile after header/nav edits.
+ARG CACHEBUST=1
+RUN echo "frontend build cache bust: ${CACHEBUST}"
 COPY . .
 RUN npm run build
 
