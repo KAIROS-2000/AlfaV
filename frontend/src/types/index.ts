@@ -472,6 +472,8 @@ export interface DashboardData {
 export interface AuthOptions {
   roles: string[]
   age_groups: string[]
+  /** Corporate domain (no leading '@') that staff (teacher/admin) accounts must use. */
+  staff_email_domain?: string
 }
 
 export interface ClassroomItem {

@@ -595,6 +595,36 @@ def token_matches_user_session(payload: dict, user: User) -> bool:
     return ok
 
 
+# Staff roles whose register/login is gated by the corporate email domain.
+# Superadmin is deliberately excluded so the bootstrap/local superadmin (often
+# on a non-corporate address like superadmin@codequest.local) is never locked
+# out. Students and parents are unrestricted and never appear here.
+STAFF_EMAIL_RESTRICTED_LOGIN_ROLES = (UserRole.TEACHER, UserRole.ADMIN)
+# Stable error code returned whenever a staff account is blocked for using a
+# non-corporate email — the frontend keys off this to show a clear message.
+STAFF_EMAIL_DOMAIN_REQUIRED_CODE = 'staff_email_domain_required'
+
+
+def staff_email_domain() -> str:
+    """Configured corporate domain for staff accounts (no leading '@', lowercase)."""
+    raw = current_app.config.get('STAFF_EMAIL_DOMAIN')
+    return (raw or '').strip().lstrip('@').lower()
+
+
+def is_corporate_staff_email(email: str) -> bool:
+    """True when ``email`` ends exactly with the configured corporate staff domain.
+
+    ``ivan@progyx.pro`` passes; ``ivan@gmail.com`` and the subdomain
+    ``ivan@school.progyx.pro`` do not (the char before the domain must be ``@``).
+    When ``STAFF_EMAIL_DOMAIN`` is empty the gate is disabled and any address is
+    accepted. Always normalize to lowercase before comparing.
+    """
+    domain = staff_email_domain()
+    if not domain:
+        return True
+    return (email or '').strip().lower().endswith('@' + domain)
+
+
 def teacher_approval_auth_error(user: User) -> tuple[dict, int] | None:
     if user.role != UserRole.TEACHER:
         return None

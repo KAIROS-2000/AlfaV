@@ -9,10 +9,13 @@ from ..core.db import db
 from .lesson_builder import build_lesson_quiz
 from ..core.security import (
     ADMIN_PASSWORD_MIN_LENGTH,
+    STAFF_EMAIL_DOMAIN_REQUIRED_CODE,
     auth_required,
     hash_password,
     invalidate_session_version_cache,
+    is_corporate_staff_email,
     revoke_refresh_tokens_for_user,
+    staff_email_domain,
     validate_password,
 )
 from ..models.learning import (
@@ -1157,6 +1160,13 @@ def create_admin(current_user: User):
     password_error = validate_password(password, minimum_length=ADMIN_PASSWORD_MIN_LENGTH)
     if not email:
         return {'message': 'Укажите email нового администратора.'}, 400
+    # Admins are staff: only corporate addresses are allowed. Password policy and
+    # superadmin authorization (the @auth_required above) are left untouched.
+    if not is_corporate_staff_email(email):
+        return {
+            'message': f'Создавать администраторов можно только с корпоративной почтой @{staff_email_domain()}.',
+            'code': STAFF_EMAIL_DOMAIN_REQUIRED_CODE,
+        }, 400
     if password_error:
         return {'message': password_error}, 400
 

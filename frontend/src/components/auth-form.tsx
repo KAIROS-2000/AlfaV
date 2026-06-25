@@ -11,6 +11,7 @@ import { queueMascotScenario } from '@/lib/mascot'
 import { setAuthenticatedSession } from '@/lib/session-store'
 import { setTheme } from '@/lib/theme'
 import { isValidRuPhone, normalizeRuPhoneInput } from '@/lib/phone'
+import { DEFAULT_STAFF_EMAIL_DOMAIN, isCorporateStaffEmail } from '@/lib/staff-email'
 import { showErrorToast, showSuccessToast } from '@/lib/toast'
 import { AuthOptions, UserItem } from '@/types'
 import Image from 'next/image'
@@ -76,6 +77,8 @@ export function AuthForm({
 
 	const isTeacherRegistration = mode === 'register' && form.role === 'teacher'
 	const isParentRegistration = mode === 'register' && form.role === 'parent'
+	const staffEmailDomain =
+		options?.staff_email_domain?.trim() || DEFAULT_STAFF_EMAIL_DOMAIN
 	const strength = useMemo(() => strengthLabel(form.password), [form.password])
 
 	useUserPageMotion(rootRef, [mode, isTeacherRegistration, isParentRegistration, strength])
@@ -89,6 +92,17 @@ export function AuthForm({
 
 		if (mode === 'register' && !isValidEmail(normalizedCredential)) {
 			showErrorToast('Укажите корректный email.')
+			return
+		}
+
+		// UX guard for teacher signup — the backend enforces the same rule.
+		if (
+			isTeacherRegistration &&
+			!isCorporateStaffEmail(normalizedCredential, staffEmailDomain)
+		) {
+			showErrorToast(
+				`Для регистрации учителя используйте корпоративную почту @${staffEmailDomain}.`,
+			)
 			return
 		}
 
@@ -254,6 +268,17 @@ export function AuthForm({
 					// Inline panel below the form replaces the toast — keeps the
 					// "send letter again" CTA right next to the user's eyes.
 					setUnverifiedLoginEmail(normalizedCredential)
+					return
+				}
+				if (code === 'staff_email_domain_required') {
+					// Role is unknown before login, so we can't pre-block — surface
+					// the backend's clear message about the corporate-email rule.
+					showErrorToast(
+						getApiErrorMessage(
+							e,
+							`Вход в аккаунт сотрудника возможен только с корпоративной почтой @${staffEmailDomain}.`,
+						),
+					)
 					return
 				}
 			}
@@ -547,6 +572,12 @@ export function AuthForm({
 									value={form.email}
 									onChange={e => setForm({ ...form, email: e.target.value })}
 								/>
+								{isTeacherRegistration && (
+									<p className='auth-helper text-sm leading-6 text-slate-500'>
+										Для регистрации учителя используйте корпоративную
+										почту @{staffEmailDomain}.
+									</p>
+								)}
 							</label>
 
 							{mode === 'register' && !isParentRegistration && (

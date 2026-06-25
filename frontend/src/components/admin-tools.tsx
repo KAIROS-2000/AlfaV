@@ -9,6 +9,7 @@ import { AdminLessonBuilder } from '@/components/admin-lesson-builder'
 import { api } from '@/lib/api'
 import { formatLocalInstantForFilenameStem } from '@/lib/user-local-time'
 import { PUBLIC_API_URL } from '@/lib/public-env'
+import { DEFAULT_STAFF_EMAIL_DOMAIN, isCorporateStaffEmail } from '@/lib/staff-email'
 import { showErrorToast, showInfoToast, showSuccessToast } from '@/lib/toast'
 import type {
   AdminAdminDirectoryResponse,
@@ -852,6 +853,15 @@ export function SuperadminAdminsPanel({
       showInfoToast('Пароль не должен содержать пробелы.')
       return
     }
+    // Staff gate (UX only; backend enforces the same rule). The superadmin
+    // screen does not load /auth/options, so we use the shared constant.
+    const normalizedEmail = form.email.trim().toLowerCase()
+    if (!isCorporateStaffEmail(normalizedEmail)) {
+      showInfoToast(
+        `Создавать администраторов можно только с корпоративной почтой @${DEFAULT_STAFF_EMAIL_DOMAIN}.`,
+      )
+      return
+    }
 
     try {
       await api(
@@ -860,7 +870,7 @@ export function SuperadminAdminsPanel({
           method: 'POST',
           body: JSON.stringify({
             full_name: form.full_name,
-            email: form.email.trim().toLowerCase(),
+            email: normalizedEmail,
             password: form.password,
           }),
         },
@@ -923,7 +933,7 @@ export function SuperadminAdminsPanel({
               className="w-full rounded-2xl border border-slate-200 px-4 py-3"
               value={form.email}
               onChange={(event) => setForm({ ...form, email: event.target.value })}
-              placeholder="ops@example.com"
+              placeholder="admin@progyx.pro"
             />
           </label>
           <label className="space-y-2">

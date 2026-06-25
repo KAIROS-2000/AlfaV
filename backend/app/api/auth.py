@@ -25,6 +25,7 @@ from ..core.security import (
     generate_initial_password,
     hash_password,
     invalidate_session_version_cache,
+    is_corporate_staff_email,
     login_attempt_allowed,
     password_reset_attempt_allowed,
     password_strength,
@@ -43,9 +44,12 @@ from ..core.security import (
     set_auth_cookies,
     set_access_cookie,
     revoke_refresh_token,
+    staff_email_domain,
     token_matches_user_session,
     validate_password,
     verify_password,
+    STAFF_EMAIL_DOMAIN_REQUIRED_CODE,
+    STAFF_EMAIL_RESTRICTED_LOGIN_ROLES,
 )
 from ..models.user import (
     EMAIL_TOKEN_PURPOSE_PASSWORD_RESET,
@@ -102,6 +106,9 @@ def register_options():
     return {
         'roles': [UserRole.STUDENT.value, UserRole.TEACHER.value, UserRole.PARENT.value],
         'age_groups': sorted(VALID_AGE_GROUPS),
+        # Frontend UX hint only — the backend remains the source of truth for the
+        # staff (teacher/admin) corporate-email gate.
+        'staff_email_domain': staff_email_domain(),
     }
 
 
@@ -147,6 +154,17 @@ def register():
         register_register_failure(email, ip)
         db.session.commit()
         return {'message': 'Укажите корректный email.'}, 400
+
+    # Staff gate: teachers self-register only with a corporate address. Students
+    # and parents are unaffected. Backend is the source of truth even if the
+    # frontend hint is bypassed.
+    if role == UserRole.TEACHER.value and not is_corporate_staff_email(email):
+        register_register_failure(email, ip)
+        db.session.commit()
+        return {
+            'message': f'Для регистрации учителя используйте корпоративную почту @{staff_email_domain()}.',
+            'code': STAFF_EMAIL_DOMAIN_REQUIRED_CODE,
+        }, 400
 
     _cleanup_expired_auth_accounts()
 
@@ -410,6 +428,25 @@ def login():
         register_login_failure(login_value or 'unknown', ip)
         db.session.commit()
         return {'message': 'Неверный email или пароль.'}, 401
+
+    # Corporate-domain gate for staff accounts: a teacher/admin whose stored
+    # email is not on the corporate domain cannot sign in even with the correct
+    # password. No auth cookies are issued. We do NOT burn the rate-limit
+    # counter — the credentials are valid; this is a policy block (mirrors the
+    # email_not_verified handling below). Superadmin is intentionally exempt so
+    # the bootstrap/local superadmin is never locked out.
+    if (
+        user.role in STAFF_EMAIL_RESTRICTED_LOGIN_ROLES
+        and not is_corporate_staff_email(user.email)
+    ):
+        return {
+            'message': (
+                'Аккаунты сотрудников (учитель, администратор) входят только с '
+                f'корпоративной почтой @{staff_email_domain()}. Обратитесь к администратору.'
+            ),
+            'code': STAFF_EMAIL_DOMAIN_REQUIRED_CODE,
+        }, 403
+
     teacher_approval_status = user.teacher_approval_status or TEACHER_APPROVAL_APPROVED
     if user.role == UserRole.TEACHER and teacher_approval_status != TEACHER_APPROVAL_APPROVED:
         if teacher_approval_status == TEACHER_APPROVAL_PENDING:
@@ -489,6 +526,19 @@ def refresh():
         register_refresh_failure(ip)
         db.session.commit()
         return {'message': 'Пользователь заблокирован.', 'code': 'user_blocked'}, 401
+    if (
+        user.role in STAFF_EMAIL_RESTRICTED_LOGIN_ROLES
+        and not is_corporate_staff_email(user.email)
+    ):
+        # Defence-in-depth: a pre-existing staff session on a non-corporate
+        # address must not be able to mint fresh access tokens after the gate
+        # ships. Drop the refresh row so the session is fully retired.
+        db.session.delete(refresh_row)
+        db.session.commit()
+        return {
+            'message': 'Аккаунт сотрудника требует корпоративную почту. Обратитесь к администратору.',
+            'code': STAFF_EMAIL_DOMAIN_REQUIRED_CODE,
+        }, 401
     if (
         user.role in {UserRole.STUDENT, UserRole.TEACHER}
         and not user.email_verified

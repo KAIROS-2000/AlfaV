@@ -46,6 +46,7 @@ class P0FixesBase(unittest.TestCase):
         database_path = Path(tempdir.name) / 'test.db'
         env = {
             'APP_ENV': 'development',
+            'STAFF_EMAIL_DOMAIN': '',  # disable corporate staff-email gate (unrelated to this suite)
             'SECRET_KEY': 'UnitTestSecretKey123!UnitTestSecretKey123!',
             'DATABASE_URL': f'sqlite:///{database_path.as_posix()}',
             'CLIENT_URL': 'http://localhost:3000',

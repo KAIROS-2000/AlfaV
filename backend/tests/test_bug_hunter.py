@@ -37,6 +37,7 @@ class BugHunterApiTests(unittest.TestCase):
         media_dir.mkdir(parents=True, exist_ok=True)
         env = {
             'APP_ENV': 'development',
+            'STAFF_EMAIL_DOMAIN': '',  # disable corporate staff-email gate (unrelated to this suite)
             'SECRET_KEY': 'UnitTestSecretKey123!UnitTestSecretKey123!',
             'DATABASE_URL': f'sqlite:///{database_path.as_posix()}',
             'MEDIA_DIR': str(media_dir.resolve()),

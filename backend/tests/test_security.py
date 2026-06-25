@@ -42,6 +42,7 @@ class SecurityRegressionTests(unittest.TestCase):
         database_path = Path(tempdir.name) / 'test.db'
         env = {
             'APP_ENV': 'development',
+            'STAFF_EMAIL_DOMAIN': 'progyx.pro',  # gate ON: exercised by the staff-email tests
             'SECRET_KEY': 'UnitTestSecretKey123!UnitTestSecretKey123!',
             'DATABASE_URL': f'sqlite:///{database_path.as_posix()}',
             'CLIENT_URL': 'http://localhost:3000',
@@ -465,6 +466,158 @@ class SecurityRegressionTests(unittest.TestCase):
             from app.services.site_activity_log import _access_user_from_request
 
             self.assertEqual(_access_user_from_request(), (None, 'anonymous'))
+
+    # ------------------------------------------------------------------
+    # Corporate staff-email gate (teacher/admin require @progyx.pro)
+    # ------------------------------------------------------------------
+
+    def make_user(self, app, *, email, role, password='StaffPass123!', age_group='adult', **extra):
+        from app.core.db import db
+        from app.core.security import hash_password
+        from app.models.user import User, UserRole
+
+        with app.app_context():
+            user = User(
+                full_name=f'{role.title()} User',
+                email=email,
+                password_hash=hash_password(password),
+                role=UserRole(role),
+                age_group=age_group,
+                **extra,
+            )
+            db.session.add(user)
+            db.session.commit()
+            return user.id
+
+    def test_teacher_registration_requires_corporate_email(self):
+        app = self.create_app()
+        with app.test_client() as client:
+            # Personal domain is rejected with the stable code; no account created.
+            rejected = client.post(
+                '/api/auth/register',
+                json={
+                    'full_name': 'Outside Teacher',
+                    'email': 'teacher@gmail.com',
+                    'phone': '+7 (912) 345-67-89',
+                    'password': 'TeacherPass123!',
+                    'role': 'teacher',
+                },
+            )
+            self.assertEqual(rejected.status_code, 400)
+            self.assertEqual(rejected.get_json().get('code'), 'staff_email_domain_required')
+
+            # Corporate teacher is accepted and keeps the pending-approval flow.
+            accepted = client.post(
+                '/api/auth/register',
+                json={
+                    'full_name': 'Corporate Teacher',
+                    'email': 'teacher@progyx.pro',
+                    'phone': '+7 (912) 345-67-90',
+                    'password': 'TeacherPass123!',
+                    'role': 'teacher',
+                },
+            )
+            self.assertEqual(accepted.status_code, 201, accepted.get_json())
+            body = accepted.get_json()
+            self.assertEqual(body['status'], 'pending')
+            self.assertEqual(body['teacher_request']['teacher_approval_status'], 'pending')
+            self.assertFalse(body['teacher_request']['is_active'])
+
+        with app.app_context():
+            from app.models.user import User
+
+            self.assertIsNone(User.query.filter_by(email='teacher@gmail.com').first())
+
+    def test_student_and_parent_registration_allow_any_email(self):
+        app = self.create_app()
+        with app.test_client() as client:
+            student = client.post(
+                '/api/auth/register',
+                json={
+                    'full_name': 'Any Student',
+                    'email': 'pupil@gmail.com',
+                    'phone': '+7 (912) 000-00-01',
+                    'password': 'StudentPass123!',
+                    'role': 'student',
+                    'age_group': 'middle',
+                },
+            )
+            self.assertEqual(student.status_code, 201, student.get_json())
+
+            parent = client.post(
+                '/api/auth/register',
+                json={'email': 'mama@gmail.com', 'role': 'parent'},
+            )
+            self.assertEqual(parent.status_code, 201, parent.get_json())
+
+    def test_staff_login_requires_corporate_email(self):
+        app = self.create_app()
+        self.make_user(app, email='legacy-teacher@gmail.com', role='teacher')
+        self.make_user(app, email='legacy-admin@gmail.com', role='admin')
+        self.make_user(app, email='corp-admin@progyx.pro', role='admin')
+        # Superadmin is exempt so the bootstrap/local account is never locked out.
+        self.make_user(app, email='boss@codequest.local', role='superadmin')
+
+        # Teacher on a personal domain: correct password, still 403, no auth cookies.
+        with app.test_client() as client:
+            response = client.post(
+                '/api/auth/login',
+                json={'login': 'legacy-teacher@gmail.com', 'password': 'StaffPass123!'},
+            )
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.get_json().get('code'), 'staff_email_domain_required')
+            cookies = response.headers.getlist('Set-Cookie')
+            self.assertFalse(any('codequest_access_token=' in c for c in cookies), cookies)
+            self.assertFalse(any('codequest_refresh_token=' in c for c in cookies), cookies)
+
+        with app.test_client() as client:
+            response = client.post(
+                '/api/auth/login',
+                json={'login': 'legacy-admin@gmail.com', 'password': 'StaffPass123!'},
+            )
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.get_json().get('code'), 'staff_email_domain_required')
+
+        with app.test_client() as client:
+            response = client.post(
+                '/api/auth/login',
+                json={'login': 'corp-admin@progyx.pro', 'password': 'StaffPass123!'},
+            )
+            self.assertEqual(response.status_code, 200, response.get_json())
+            self.assertEqual(response.get_json()['user']['role'], 'admin')
+
+        with app.test_client() as client:
+            response = client.post(
+                '/api/auth/login',
+                json={'login': 'boss@codequest.local', 'password': 'StaffPass123!'},
+            )
+            self.assertEqual(response.status_code, 200, response.get_json())
+            self.assertEqual(response.get_json()['user']['role'], 'superadmin')
+
+    def test_non_staff_login_ignores_email_domain(self):
+        app = self.create_app()
+        self.create_user(app, email='pupil@gmail.com')
+        self.make_user(
+            app,
+            email='mama@gmail.com',
+            role='parent',
+            age_group=None,
+            password='ParentPass123!',
+        )
+
+        with app.test_client() as client:
+            student_login = client.post(
+                '/api/auth/login',
+                json={'login': 'pupil@gmail.com', 'password': 'StrongPass123!'},
+            )
+            self.assertEqual(student_login.status_code, 200, student_login.get_json())
+
+        with app.test_client() as client:
+            parent_login = client.post(
+                '/api/auth/login',
+                json={'login': 'mama@gmail.com', 'password': 'ParentPass123!'},
+            )
+            self.assertEqual(parent_login.status_code, 200, parent_login.get_json())
 
 
 if __name__ == '__main__':
