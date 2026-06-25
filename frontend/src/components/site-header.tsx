@@ -36,6 +36,15 @@ function resolveHeaderZone(pathname: string | null): HeaderZone {
 
 type NavLink = { href: string; label: string }
 
+/** Пользовательская форма репортов на публичном маршруте. Staff-модерация — в админках. */
+const BUG_HUNTER_LINK: NavLink = { href: '/bug-hunter', label: 'Баг-хантер' }
+
+function bugHunterLinkForRole(role: UserRole | null): NavLink {
+	if (role === 'admin') return { href: '/admin/bug-hunter', label: 'Баг-хантер' }
+	if (role === 'superadmin') return { href: '/superadmin/bug-hunter', label: 'Баг-хантер' }
+	return BUG_HUNTER_LINK
+}
+
 function isCabinetLink(link: NavLink) {
 	if (
 		link.href === '/dashboard' ||
@@ -53,77 +62,137 @@ function isLessonsLink(link: NavLink) {
 	return link.href === '/roadmap' || link.label === 'Уроки'
 }
 
-/** «Кабинет» + «Уроки» в компактной шапке; остальное — в выезжающем меню. */
-function splitMobileNavLinks(links: NavLink[]): {
-	primary: NavLink[]
-	overflow: NavLink[]
-} {
-	const home = links.find(link => link.href === '/')
-	const career = links.find(link => link.href === '/it-career')
-	if (home && career) {
-		const primary = [home, career]
-		const primaryHrefs = new Set(primary.map(link => link.href))
-		return {
-			primary,
-			overflow: links.filter(link => !primaryHrefs.has(link.href)),
-		}
+/** Меньше число — выше приоритет (остаётся в шапке дольше). */
+function navLinkPriority(link: NavLink): number {
+	if (link.href === '/') return 0
+	if (link.href === '/it-career') return 1
+	if (isCabinetLink(link)) return 0
+	if (isLessonsLink(link)) return 1
+	if (link.href.includes('messages') || /сообщен/i.test(link.label)) return 2
+	if (link.href.includes('bug-hunter') || /баг-хантер/i.test(link.label)) return 2
+	if (link.href === '/leaderboard' || /рейтинг/i.test(link.label)) return 3
+	if (link.href === '/useful' || link.label === 'Полезное') return 4
+	if (link.href === '/tournament' || /турнир/i.test(link.label)) return 5
+	if (link.href === '/teacher' || link.label === 'Учитель') return 2
+	if (link.href.includes('/logs') || link.label === 'Логи') return 5
+	if (link.href === '/parent' || /родител/i.test(link.label)) return 3
+	if (link.href === '/auth/register' || link.label === 'Регистрация') return 4
+	if (link.href === '/profile' || /профиль/i.test(link.label)) return 6
+	return 7
+}
+
+function orderNavLinksByPriority(links: NavLink[]): NavLink[] {
+	return [...links].sort((a, b) => {
+		const diff = navLinkPriority(a) - navLinkPriority(b)
+		if (diff !== 0) return diff
+		return links.findIndex(l => l.href === a.href) - links.findIndex(l => l.href === b.href)
+	})
+}
+
+const MIN_HEADER_NAV_VISIBLE = 2
+const HEADER_STACKED_BELOW_PX = 1360
+
+/** Сколько вкладок оставить в шапке по ширине (остальное — в сайдбар). */
+function getHeaderVisibleCount(width: number, linkCount: number): number {
+	if (linkCount <= MIN_HEADER_NAV_VISIBLE) return linkCount
+
+	if (width >= 1080) return linkCount
+	if (width >= 960) return Math.max(MIN_HEADER_NAV_VISIBLE, linkCount - 1)
+	if (width >= 880) return Math.max(MIN_HEADER_NAV_VISIBLE, linkCount - 2)
+	if (width >= 780) return Math.max(MIN_HEADER_NAV_VISIBLE, linkCount - 3)
+	if (width >= 700) return Math.max(MIN_HEADER_NAV_VISIBLE, linkCount - 4)
+
+	return MIN_HEADER_NAV_VISIBLE
+}
+
+function splitNavLinksByVisibleCount(
+	links: NavLink[],
+	visibleCount: number,
+): { primary: NavLink[]; overflow: NavLink[] } {
+	if (links.length === 0) {
+		return { primary: [], overflow: [] }
 	}
 
-	const cabinet = links.find(isCabinetLink)
-	const lessons = links.find(isLessonsLink)
-
-	if (!cabinet && !lessons) {
-		if (links.length > 3) {
-			return { primary: links.slice(0, 3), overflow: links.slice(3) }
-		}
-		return { primary: links, overflow: [] }
-	}
-
-	const primary: NavLink[] = []
-	if (cabinet) primary.push(cabinet)
-	if (lessons && lessons.href !== cabinet?.href) primary.push(lessons)
-
-	const primaryHrefs = new Set(primary.map(p => p.href))
-	const overflow = links.filter(l => !primaryHrefs.has(l.href))
-
-	if (overflow.length === 0) {
-		return { primary: links, overflow: [] }
-	}
+	const count = Math.max(
+		MIN_HEADER_NAV_VISIBLE,
+		Math.min(visibleCount, links.length),
+	)
+	const ordered = orderNavLinksByPriority(links)
+	const primary = ordered.slice(0, count)
+	const primaryHrefs = new Set(primary.map(link => link.href))
+	const overflow = ordered.filter(link => !primaryHrefs.has(link.href))
 
 	return { primary, overflow }
 }
 
-const MOBILE_NAV_MQ = '(max-width: 767px)'
+type HeaderDensity = 'normal' | 'compact-1' | 'compact-2' | 'compact-3'
 
-function subscribeMobileNavMq(onChange: () => void) {
+type HeaderLayout = {
+	width: number
+	density: HeaderDensity
+	useStackedNav: boolean
+	useCompactShell: boolean
+}
+
+function resolveHeaderLayout(width: number): HeaderLayout {
+	let density: HeaderDensity = 'normal'
+
+	if (width >= 1280) {
+		density = 'normal'
+	} else if (width >= 1160) {
+		density = 'compact-1'
+	} else if (width >= 1040) {
+		density = 'compact-2'
+	} else {
+		density = 'compact-3'
+	}
+
+	return {
+		width,
+		density,
+		useStackedNav: width < HEADER_STACKED_BELOW_PX,
+		useCompactShell: width < 768,
+	}
+}
+
+const HEADER_LAYOUT_MQ = '(max-width: 767px)'
+
+function subscribeHeaderLayout(onChange: () => void) {
 	if (typeof window === 'undefined') return () => {}
-	const mq = window.matchMedia(MOBILE_NAV_MQ)
+	window.addEventListener('resize', onChange, { passive: true })
+	const mq = window.matchMedia(HEADER_LAYOUT_MQ)
 	mq.addEventListener('change', onChange)
-	return () => mq.removeEventListener('change', onChange)
+	return () => {
+		window.removeEventListener('resize', onChange)
+		mq.removeEventListener('change', onChange)
+	}
 }
 
-function getMobileNavSnapshot() {
-	if (typeof window === 'undefined') return false
-	return window.matchMedia(MOBILE_NAV_MQ).matches
+function getHeaderLayoutWidthSnapshot(): number {
+	if (typeof window === 'undefined') {
+		return 1280
+	}
+	return window.innerWidth
 }
 
-function getMobileNavServerSnapshot() {
-	return false
+function getHeaderLayoutServerSnapshot(): number {
+	return 1280
 }
 
-function useMobileNavLayout() {
-	return useSyncExternalStore(
-		subscribeMobileNavMq,
-		getMobileNavSnapshot,
-		getMobileNavServerSnapshot,
+function useHeaderLayout() {
+	const width = useSyncExternalStore(
+		subscribeHeaderLayout,
+		getHeaderLayoutWidthSnapshot,
+		getHeaderLayoutServerSnapshot,
 	)
+
+	return useMemo(() => resolveHeaderLayout(width), [width])
 }
 
 export function SiteHeader() {
 	const pathname = usePathname()
 	const zone = resolveHeaderZone(pathname)
 	const { user } = useSessionUser({ auth: 'optional' })
-	const isMobileNav = useMobileNavLayout()
 	const [sidebarOpen, setSidebarOpen] = useState(false)
 	const [drawerPortalReady, setDrawerPortalReady] = useState(false)
 	const openEdgeSwipeRef = useRef<{
@@ -156,6 +225,8 @@ export function SiteHeader() {
 			})
 	}
 
+	const bugHunterNav = useMemo(() => bugHunterLinkForRole(role), [role])
+
 	const links = useMemo(() => {
 		if (!isAuthenticated) {
 			if (zone === 'public') {
@@ -164,6 +235,7 @@ export function SiteHeader() {
 					{ href: '/it-career', label: 'Карьера IT' },
 					{ href: '/tournament', label: 'Турнир' },
 					{ href: '/parent', label: 'Родителям' },
+					bugHunterNav,
 				]
 			}
 			if (zone === 'parent') {
@@ -172,6 +244,7 @@ export function SiteHeader() {
 					{ href: '/it-career', label: 'Карьера IT' },
 					{ href: '/parent', label: 'Родителям' },
 					{ href: '/auth/register', label: 'Регистрация' },
+					bugHunterNav,
 				]
 			}
 			return [
@@ -179,12 +252,14 @@ export function SiteHeader() {
 				{ href: '/it-career', label: 'Карьера IT' },
 				{ href: '/tournament', label: 'Турнир' },
 				{ href: '/parent', label: 'Родителям' },
+				bugHunterNav,
 			]
 		}
 
 		const secured = [
 			{ href: '/dashboard', label: 'Кабинет' },
 			{ href: '/messages', label: 'Сообщения' },
+			bugHunterNav,
 			{ href: '/roadmap', label: 'Уроки' },
 			{ href: '/useful', label: 'Полезное' },
 			{ href: '/leaderboard', label: 'Рейтинг' },
@@ -207,6 +282,7 @@ export function SiteHeader() {
 			return [
 				{ href: '/admin/users', label: 'Админ' },
 				{ href: '/admin/messages', label: 'Сообщения' },
+				bugHunterNav,
 				{ href: '/admin/logs', label: 'Логи' },
 				{ href: '/roadmap', label: 'Уроки' },
 				{ href: '/useful', label: 'Полезное' },
@@ -217,6 +293,7 @@ export function SiteHeader() {
 			return [
 				{ href: '/superadmin/users', label: 'Суперадмин' },
 				{ href: '/superadmin/messages', label: 'Сообщения' },
+				bugHunterNav,
 				{ href: '/superadmin/logs', label: 'Логи' },
 				{ href: '/roadmap', label: 'Уроки' },
 				{ href: '/useful', label: 'Полезное' },
@@ -228,6 +305,7 @@ export function SiteHeader() {
 				{ href: '/dashboard', label: 'Кабинет' },
 				{ href: '/teacher', label: 'Учитель' },
 				{ href: '/messages', label: 'Сообщения' },
+				bugHunterNav,
 				{ href: '/roadmap', label: 'Уроки' },
 				{ href: '/useful', label: 'Полезное' },
 				{ href: '/leaderboard', label: 'Рейтинг' },
@@ -242,6 +320,7 @@ export function SiteHeader() {
 				{ href: '/roadmap', label: 'Уроки' },
 				{ href: '/useful', label: 'Полезное' },
 				{ href: '/messages', label: 'Сообщения' },
+				bugHunterNav,
 				{ href: '/tournament', label: 'Турнир' },
 				{ href: '/profile', label: 'Профиль' },
 			]
@@ -251,21 +330,34 @@ export function SiteHeader() {
 			return [
 				{ href: '/', label: 'Главная' },
 				{ href: '/dashboard', label: 'Кабинет ученика' },
+				bugHunterNav,
 			]
 		}
 
 		return secured
-	}, [isAuthenticated, role, zone])
+	}, [isAuthenticated, role, zone, bugHunterNav])
 
-	const { primary: mobilePrimaryLinks, overflow: mobileOverflowLinks } =
-		useMemo(() => splitMobileNavLinks(links), [links])
+	const headerLayout = useHeaderLayout()
 
-	const useMobileDrawer =
-		isMobileNav &&
-		mobileOverflowLinks.length > 0 &&
-		mobilePrimaryLinks.length > 0
+	const headerVisibleCount = useMemo(
+		() => getHeaderVisibleCount(headerLayout.width, links.length),
+		[headerLayout.width, links.length],
+	)
 
-	const navLinks = useMobileDrawer ? mobilePrimaryLinks : links
+	const { primary: headerPrimaryLinks, overflow: headerOverflowLinks } =
+		useMemo(
+			() => splitNavLinksByVisibleCount(links, headerVisibleCount),
+			[links, headerVisibleCount],
+		)
+
+	const useSidebarMenu = headerOverflowLinks.length >= 1
+	const useCompactShell =
+		useSidebarMenu && headerLayout.useCompactShell
+	const useStackedNav =
+		!useCompactShell &&
+		(headerLayout.useStackedNav || links.length >= 5)
+
+	const navLinks = useSidebarMenu ? headerPrimaryLinks : links
 
 	useEffect(() => {
 		setDrawerPortalReady(true)
@@ -294,7 +386,7 @@ export function SiteHeader() {
 	}, [sidebarOpen])
 
 	useEffect(() => {
-		if (!useMobileDrawer || sidebarOpen) return
+		if (!useSidebarMenu || sidebarOpen) return
 
 		const edgePx = 44
 
@@ -336,7 +428,7 @@ export function SiteHeader() {
 			document.removeEventListener('touchmove', onTouchMove)
 			document.removeEventListener('touchend', onTouchEnd)
 		}
-	}, [useMobileDrawer, sidebarOpen])
+	}, [useSidebarMenu, sidebarOpen])
 
 	const onSidebarTouchStart = useCallback((e: ReactTouchEvent) => {
 		if (e.touches.length !== 1) return
@@ -391,10 +483,10 @@ export function SiteHeader() {
 
 	return (
 		<header
-			className={`progyx-header ${zone === 'public' ? 'progyx-header--public' : 'progyx-header--app'} ${useMobileDrawer ? 'progyx-header--mobile-drawer' : ''}`}
+			className={`progyx-header ${zone === 'public' ? 'progyx-header--public' : 'progyx-header--app'} progyx-header--${headerLayout.density} ${useStackedNav ? 'progyx-header--stacked' : ''} ${useCompactShell ? 'progyx-header--mobile-drawer' : ''} ${useSidebarMenu ? 'progyx-header--with-sidebar' : ''}`}
 		>
 			<div
-				className={`progyx-header__shell ${useMobileDrawer ? 'progyx-header__shell--mobile-drawer' : ''}`}
+				className={`progyx-header__shell ${useStackedNav ? 'progyx-header__shell--stacked' : ''} ${useCompactShell ? 'progyx-header__shell--mobile-drawer' : ''}`}
 			>
 				<Link
 					href='/'
@@ -418,16 +510,16 @@ export function SiteHeader() {
 				</Link>
 
 				<nav
-					className={`progyx-header__nav ${useMobileDrawer ? 'progyx-header__nav--compact' : ''}`}
+					className={`progyx-header__nav ${useStackedNav ? 'progyx-header__nav--stacked' : ''} ${useSidebarMenu ? 'progyx-header__nav--with-sidebar' : ''} ${useCompactShell ? 'progyx-header__nav--compact' : ''}`}
 					aria-label='Основная навигация'
 				>
 					{navLinks.map(renderNavLink)}
 				</nav>
 
 				<div
-					className={`progyx-header__actions ${isAuthenticated ? 'progyx-header__actions--auth' : 'progyx-header__actions--guest'} ${useMobileDrawer ? 'progyx-header__actions--with-menu' : ''}`}
+					className={`progyx-header__actions ${isAuthenticated ? 'progyx-header__actions--auth' : 'progyx-header__actions--guest'} ${useSidebarMenu ? 'progyx-header__actions--with-menu' : ''}`}
 				>
-					{useMobileDrawer ? (
+					{useSidebarMenu ? (
 						<button
 							type='button'
 							className='progyx-header__icon-button progyx-header__icon-button--menu'
@@ -473,7 +565,7 @@ export function SiteHeader() {
 				) : null}
 			</div>
 
-			{drawerPortalReady && useMobileDrawer
+			{drawerPortalReady && useSidebarMenu
 				? createPortal(
 						<>
 							<div
@@ -505,7 +597,7 @@ export function SiteHeader() {
 									className='progyx-header__sidebar-nav'
 									aria-label='Дополнительная навигация'
 								>
-									{mobileOverflowLinks.map(link => {
+									{headerOverflowLinks.map(link => {
 										const isActive =
 											pathname === link.href ||
 											(link.href !== '/' &&

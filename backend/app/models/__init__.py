@@ -36,6 +36,8 @@ from .learning import (
     UserProgress,
 )
 from .support import SupportTicket, SupportTicketMessage, SupportTicketReadState
+from .bug_hunter import BugHunterReport
+from .platform_kv import PlatformKv
 from .parent_cabinet import (
     ParentChildLink,
     ParentConsentSettings,
@@ -97,4 +99,6 @@ __all__ = [
     'SupportTicket',
     'SupportTicketMessage',
     'SupportTicketReadState',
+    'BugHunterReport',
+    'PlatformKv',
 ]

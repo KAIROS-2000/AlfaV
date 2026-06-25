@@ -279,6 +279,10 @@ export interface AdminAuditLogArchivesResponse {
   dates: string[]
   /** Dates with `site_activity_YYYY-MM-DD.json` snapshots (daily export). */
   site_activity_dates?: string[]
+  /** Keys from `admin_audit_manual_<key>.json` (immediate export). */
+  manual_audit_snapshots?: string[]
+  /** Keys from `site_activity_manual_<key>.json`. */
+  manual_site_activity_snapshots?: string[]
   export_hour_utc: number
 }
 
@@ -468,6 +472,8 @@ export interface DashboardData {
 export interface AuthOptions {
   roles: string[]
   age_groups: string[]
+  /** Corporate domain (no leading '@') that staff (teacher/admin) accounts must use. */
+  staff_email_domain?: string
 }
 
 export interface ClassroomItem {
@@ -734,6 +740,53 @@ export interface SupportTicketMessage {
 
 export interface SupportStaffTicketRow extends SupportTicketSummaryRow {
   user?: StaffDirectUserRef | null
+}
+
+/** Bug hunter feedback (screenshot + repro); XP granted only after staff approval. */
+export interface BugHunterScreenshotAsset {
+  id?: number
+  url?: string
+  format?: string
+  width?: number | null
+  height?: number | null
+}
+
+export interface BugHunterReportRow {
+  id: number
+  description: string
+  reproduction_steps: string
+  user_journey_path: string
+  screenshot?: BugHunterScreenshotAsset | null
+  moderation_status: string
+  xp_awarded: number
+  created_at: string | null
+  updated_at: string | null
+  user_id?: number
+  reporter_email?: string
+  reporter_role?: string
+  moderated_at?: string | null
+  moderator_note?: string | null
+}
+
+export interface BugHunterSubmitResponse {
+  report: BugHunterReportRow
+  xp_on_approval_preview: number
+  message: string
+}
+
+export interface BugHunterMyReportsResponse {
+  reports: BugHunterReportRow[]
+  xp_reward_on_approval: number
+}
+
+export interface BugHunterStaffListResponse {
+  reports: BugHunterReportRow[]
+  xp_reward_on_approval: number
+}
+
+export interface BugHunterStaffSettingsResponse {
+  approved_xp: number
+  max_xp: number
 }
 
 export interface StaffMessagingDirectory {

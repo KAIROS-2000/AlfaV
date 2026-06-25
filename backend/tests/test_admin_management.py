@@ -35,6 +35,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         database_path = Path(tempdir.name) / 'test.db'
         env = {
             'APP_ENV': 'development',
+            'STAFF_EMAIL_DOMAIN': 'progyx.pro',  # gate ON: exercised by the staff-email tests
             'SECRET_KEY': 'UnitTestSecretKey123!UnitTestSecretKey123!',
             'DATABASE_URL': f'sqlite:///{database_path.as_posix()}',
             'CLIENT_URL': 'http://localhost:3000',
@@ -98,7 +99,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         admin_id = self.create_user(
             app,
             full_name='Admin Example',
-            email='admin@example.com',
+            email='admin@progyx.pro',
             password='AdminPass123!',
             role='admin',
             age_group='adult',
@@ -122,14 +123,14 @@ class AdminManagementRegressionTests(unittest.TestCase):
         secondary_admin_id = self.create_user(
             app,
             full_name='Ops Admin',
-            email='opsadmin@example.com',
+            email='opsadmin@progyx.pro',
             password='OpsAdminPass123!',
             role='admin',
             age_group='adult',
         )
 
         with app.test_client() as admin_client:
-            login_response = self.login(admin_client, 'admin@example.com', 'AdminPass123!')
+            login_response = self.login(admin_client, 'admin@progyx.pro', 'AdminPass123!')
             self.assertEqual(login_response.status_code, 200)
 
             filtered = admin_client.get('/api/admin/users?email=alice@&status=active&page=1&page_size=10')
@@ -161,7 +162,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         admin_id = self.create_user(
             app,
             full_name='Admin Example',
-            email='admin@example.com',
+            email='admin@progyx.pro',
             password='AdminPass123!',
             role='admin',
             age_group='adult',
@@ -172,7 +173,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
                 '/api/auth/register',
                 json={
                     'full_name': 'Pending Teacher',
-                    'email': 'mentor1@example.com',
+                    'email': 'mentor1@progyx.pro',
                     'phone': '+7 912 345-67-89',
                     'password': 'TeacherPass123!',
                     'role': 'teacher',
@@ -184,12 +185,12 @@ class AdminManagementRegressionTests(unittest.TestCase):
             self.assertEqual(register_payload['teacher_request']['teacher_approval_status'], 'pending')
             self.assertFalse(register_payload['teacher_request']['is_active'])
 
-            pending_login = self.login(teacher_client, 'mentor1@example.com', 'TeacherPass123!')
+            pending_login = self.login(teacher_client, 'mentor1@progyx.pro', 'TeacherPass123!')
             self.assertEqual(pending_login.status_code, 403)
             self.assertEqual(pending_login.get_json()['code'], 'teacher_approval_pending')
 
         with app.test_client() as admin_client:
-            login_response = self.login(admin_client, 'admin@example.com', 'AdminPass123!')
+            login_response = self.login(admin_client, 'admin@progyx.pro', 'AdminPass123!')
             self.assertEqual(login_response.status_code, 200)
 
             requests_response = admin_client.get('/api/admin/teacher-requests?status=pending&page_size=10')
@@ -197,7 +198,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             requests_payload = requests_response.get_json()
             self.assertEqual(requests_payload['pagination']['total'], 1)
             request_user = requests_payload['teacher_requests'][0]
-            self.assertEqual(request_user['email'], 'mentor1@example.com')
+            self.assertEqual(request_user['email'], 'mentor1@progyx.pro')
 
             users_response = admin_client.get('/api/admin/users?email=mentor1&page_size=10')
             self.assertEqual(users_response.status_code, 200)
@@ -224,12 +225,12 @@ class AdminManagementRegressionTests(unittest.TestCase):
             from app.core.db import db
             from app.models.user import User
 
-            approved_user_row = User.query.filter_by(email='mentor1@example.com').first()
+            approved_user_row = User.query.filter_by(email='mentor1@progyx.pro').first()
             approved_user_row.email_verified = True
             db.session.commit()
 
         with app.test_client() as approved_teacher_client:
-            approved_login = self.login(approved_teacher_client, 'mentor1@example.com', 'TeacherPass123!')
+            approved_login = self.login(approved_teacher_client, 'mentor1@progyx.pro', 'TeacherPass123!')
             self.assertEqual(approved_login.status_code, 200)
             self.assertEqual(approved_login.get_json()['user']['role'], 'teacher')
 
@@ -238,7 +239,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         self.create_user(
             app,
             full_name='Admin Example',
-            email='admin@example.com',
+            email='admin@progyx.pro',
             password='AdminPass123!',
             role='admin',
             age_group='adult',
@@ -249,7 +250,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
                 '/api/auth/register',
                 json={
                     'full_name': 'Rejected Teacher',
-                    'email': 'mentor2@example.com',
+                    'email': 'mentor2@progyx.pro',
                     'phone': '+7 912 345-67-90',
                     'password': 'TeacherPass123!',
                     'role': 'teacher',
@@ -259,7 +260,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             teacher_id = register_response.get_json()['teacher_request']['id']
 
         with app.test_client() as admin_client:
-            login_response = self.login(admin_client, 'admin@example.com', 'AdminPass123!')
+            login_response = self.login(admin_client, 'admin@progyx.pro', 'AdminPass123!')
             self.assertEqual(login_response.status_code, 200)
 
             reject_response = admin_client.patch(f'/api/admin/teacher-requests/{teacher_id}/reject')
@@ -270,7 +271,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             self.assertIsNotNone(rejected_user['teacher_rejection_expires_at'])
 
         with app.test_client() as rejected_teacher_client:
-            rejected_login = self.login(rejected_teacher_client, 'mentor2@example.com', 'TeacherPass123!')
+            rejected_login = self.login(rejected_teacher_client, 'mentor2@progyx.pro', 'TeacherPass123!')
             self.assertEqual(rejected_login.status_code, 403)
             self.assertEqual(rejected_login.get_json()['code'], 'teacher_approval_rejected')
 
@@ -284,7 +285,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             db.session.commit()
 
         with app.test_client() as admin_client:
-            login_response = self.login(admin_client, 'admin@example.com', 'AdminPass123!')
+            login_response = self.login(admin_client, 'admin@progyx.pro', 'AdminPass123!')
             self.assertEqual(login_response.status_code, 200)
 
             cleanup_response = admin_client.get('/api/admin/teacher-requests?status=all&page_size=10')
@@ -301,7 +302,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
                 '/api/auth/register',
                 json={
                     'full_name': 'Rejected Teacher Retry',
-                    'email': 'mentor2@example.com',
+                    'email': 'mentor2@progyx.pro',
                     'phone': '+7 912 345-67-90',
                     'password': 'TeacherPass123!',
                     'role': 'teacher',
@@ -315,7 +316,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         self.create_user(
             app,
             full_name='Admin Example',
-            email='admin@example.com',
+            email='admin@progyx.pro',
             password='AdminPass123!',
             role='admin',
             age_group='adult',
@@ -335,7 +336,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         student_login = self.login(student_client, 'refresh1@example.com', 'StudentPass123!')
         self.assertEqual(student_login.status_code, 200)
 
-        admin_login = self.login(admin_client, 'admin@example.com', 'AdminPass123!')
+        admin_login = self.login(admin_client, 'admin@progyx.pro', 'AdminPass123!')
         self.assertEqual(admin_login.status_code, 200)
         block_response = admin_client.patch(f'/api/admin/users/{student_id}/block')
         self.assertEqual(block_response.status_code, 200)
@@ -349,7 +350,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         self.create_user(
             app,
             full_name='Admin Example',
-            email='admin@example.com',
+            email='admin@progyx.pro',
             password='AdminPass123!',
             role='admin',
             age_group='adult',
@@ -369,7 +370,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         student_login = self.login(student_client, 'active1@example.com', 'StudentPass123!')
         self.assertEqual(student_login.status_code, 200)
 
-        admin_login = self.login(admin_client, 'admin@example.com', 'AdminPass123!')
+        admin_login = self.login(admin_client, 'admin@progyx.pro', 'AdminPass123!')
         self.assertEqual(admin_login.status_code, 200)
         block_response = admin_client.patch(f'/api/admin/users/{student_id}/block')
         self.assertEqual(block_response.status_code, 200)
@@ -383,7 +384,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         admin_id = self.create_user(
             app,
             full_name='Admin Example',
-            email='admin@example.com',
+            email='admin@progyx.pro',
             password='AdminPass123!',
             role='admin',
             age_group='adult',
@@ -503,7 +504,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             custom_module_id = custom_module.id
 
         with app.test_client() as admin_client:
-            admin_login = self.login(admin_client, 'admin@example.com', 'AdminPass123!')
+            admin_login = self.login(admin_client, 'admin@progyx.pro', 'AdminPass123!')
             self.assertEqual(admin_login.status_code, 200)
             forbidden_delete = admin_client.delete(f'/api/admin/users/{student_id}')
             self.assertEqual(forbidden_delete.status_code, 403)
@@ -562,7 +563,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         self.create_user(
             app,
             full_name='Admin Example',
-            email='admin@example.com',
+            email='admin@progyx.pro',
             password='AdminPass123!',
             role='admin',
             age_group='adult',
@@ -766,7 +767,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             db.session.commit()
 
         with app.test_client() as admin_client:
-            login_response = self.login(admin_client, 'admin@example.com', 'AdminPass123!')
+            login_response = self.login(admin_client, 'admin@progyx.pro', 'AdminPass123!')
             self.assertEqual(login_response.status_code, 200)
 
             telemetry_response = admin_client.get('/api/admin/telemetry')
@@ -796,7 +797,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         self.create_user(
             app,
             full_name='Admin Example',
-            email='admin@example.com',
+            email='admin@progyx.pro',
             password='AdminPass123!',
             role='admin',
             age_group='adult',
@@ -840,7 +841,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             db.session.commit()
 
         with app.test_client() as admin_client:
-            login_response = self.login(admin_client, 'admin@example.com', 'AdminPass123!')
+            login_response = self.login(admin_client, 'admin@progyx.pro', 'AdminPass123!')
             self.assertEqual(login_response.status_code, 200)
             telemetry_response = admin_client.get('/api/admin/telemetry')
             self.assertEqual(telemetry_response.status_code, 200)
@@ -871,7 +872,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
                 '/api/admin/admins',
                 json={
                     'full_name': 'Operations Admin',
-                    'email': 'ops@example.com',
+                    'email': 'ops@progyx.pro',
                     'password': 'OpsAdminPass123!',
                 },
             )
@@ -882,7 +883,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             self.assertEqual(admins_response.status_code, 200)
             admins_payload = admins_response.get_json()
             self.assertEqual(admins_payload['pagination']['total'], 1)
-            self.assertEqual(admins_payload['admins'][0]['email'], 'ops@example.com')
+            self.assertEqual(admins_payload['admins'][0]['email'], 'ops@progyx.pro')
 
             block_response = superadmin_client.patch(f'/api/admin/admins/{admin_id}/block')
             self.assertEqual(block_response.status_code, 200)
@@ -894,10 +895,56 @@ class AdminManagementRegressionTests(unittest.TestCase):
             self.assertEqual(audit_response.status_code, 200)
             audit_payload = audit_response.get_json()
             self.assertEqual(audit_payload['pagination']['total'], 1)
-            self.assertEqual(audit_payload['audit_logs'][0]['details']['target_email'], 'ops@example.com')
+            self.assertEqual(audit_payload['audit_logs'][0]['details']['target_email'], 'ops@progyx.pro')
 
             delete_response = superadmin_client.delete(f'/api/admin/admins/{admin_id}')
             self.assertEqual(delete_response.status_code, 200)
+
+    def test_create_admin_requires_corporate_email(self):
+        app = self.create_app()
+        self.create_user(
+            app,
+            full_name='Super Admin',
+            email='root@example.com',
+            password='RootPass123!',
+            role='superadmin',
+            age_group='adult',
+        )
+
+        with app.test_client() as superadmin_client:
+            login_response = self.login(superadmin_client, 'root@example.com', 'RootPass123!')
+            self.assertEqual(login_response.status_code, 200)
+
+            # A non-corporate address is rejected with the stable code, and no
+            # account is created.
+            rejected = superadmin_client.post(
+                '/api/admin/admins',
+                json={
+                    'full_name': 'Outside Admin',
+                    'email': 'admin@gmail.com',
+                    'password': 'OpsAdminPass123!',
+                },
+            )
+            self.assertEqual(rejected.status_code, 400)
+            self.assertEqual(rejected.get_json().get('code'), 'staff_email_domain_required')
+
+            # A corporate address still works and password policy is unchanged.
+            accepted = superadmin_client.post(
+                '/api/admin/admins',
+                json={
+                    'full_name': 'Corporate Admin',
+                    'email': 'admin@progyx.pro',
+                    'password': 'OpsAdminPass123!',
+                },
+            )
+            self.assertEqual(accepted.status_code, 201, accepted.get_json())
+            self.assertEqual(accepted.get_json()['user']['email'], 'admin@progyx.pro')
+
+        with app.app_context():
+            from app.models.user import User
+
+            self.assertIsNone(User.query.filter_by(email='admin@gmail.com').first())
+            self.assertIsNotNone(User.query.filter_by(email='admin@progyx.pro').first())
 
     def test_audit_log_export_clears_db_and_archive_api(self):
         import json
@@ -909,7 +956,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         self.create_user(
             app,
             full_name='Admin Example',
-            email='admin@example.com',
+            email='admin@progyx.pro',
             password='AdminPass123!',
             role='admin',
             age_group='adult',
@@ -919,7 +966,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             from app.core.db import db
             from app.models.user import AdminAuditLog, User, UserRole
 
-            user = User.query.filter_by(email='admin@example.com').first()
+            user = User.query.filter_by(email='admin@progyx.pro').first()
             assert user is not None
             db.session.add(
                 AdminAuditLog(
@@ -935,7 +982,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             db.session.commit()
 
         with app.test_client() as client:
-            login_response = self.login(client, 'admin@example.com', 'AdminPass123!')
+            login_response = self.login(client, 'admin@progyx.pro', 'AdminPass123!')
             self.assertEqual(login_response.status_code, 200)
             list_before = client.get('/api/admin/audit-log-archives')
             self.assertEqual(list_before.status_code, 200)
@@ -961,7 +1008,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         self.assertEqual(data['items'][0]['action'], 'test_action')
 
         with app.test_client() as client:
-            self.login(client, 'admin@example.com', 'AdminPass123!')
+            self.login(client, 'admin@progyx.pro', 'AdminPass123!')
             list_after = client.get('/api/admin/audit-log-archives')
             self.assertEqual(list_after.status_code, 200)
             archives_json = list_after.get_json()
@@ -984,7 +1031,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         self.create_user(
             app,
             full_name='Admin Example',
-            email='admin_sa@example.com',
+            email='admin_sa@progyx.pro',
             password='AdminPass123!',
             role='admin',
             age_group='adult',
@@ -1033,7 +1080,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         self.assertEqual(dumped['items'][0]['path'], '/api/hello')
 
         with app.test_client() as client:
-            self.login(client, 'admin_sa@example.com', 'AdminPass123!')
+            self.login(client, 'admin_sa@progyx.pro', 'AdminPass123!')
             archives = client.get('/api/admin/audit-log-archives')
             self.assertEqual(archives.status_code, 200)
             self.assertEqual(archives.get_json()['dates'], [])
@@ -1053,7 +1100,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         admin_id = self.create_user(
             app,
             full_name='Admin Example',
-            email='manual-export@example.com',
+            email='manual-export@progyx.pro',
             password='AdminPass123!',
             role='admin',
             age_group='adult',
@@ -1086,7 +1133,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             db.session.commit()
 
         with app.test_client() as client:
-            login_response = self.login(client, 'manual-export@example.com', 'AdminPass123!')
+            login_response = self.login(client, 'manual-export@progyx.pro', 'AdminPass123!')
             self.assertEqual(login_response.status_code, 200)
 
             resp = client.post(
@@ -1123,6 +1170,20 @@ class AdminManagementRegressionTests(unittest.TestCase):
         self.assertEqual(jd.get('snapshot_timezone'), 'browser_local')
         self.assertEqual(jd['items'][0]['action'], 'manual_test')
 
+        with app.test_client() as client:
+            self.login(client, 'manual-export@progyx.pro', 'AdminPass123!')
+            listing = client.get('/api/admin/audit-log-archives')
+            self.assertEqual(listing.status_code, 200)
+            lj = listing.get_json() or {}
+            self.assertEqual(lj.get('manual_audit_snapshots'), ['2099-12-31_23-59-59'])
+            self.assertEqual(lj.get('manual_site_activity_snapshots'), ['2099-12-31_23-59-59'])
+            self.assertEqual(lj.get('dates'), [])
+            dl_a = client.get('/api/admin/manual-audit-log-archives/2099-12-31_23-59-59')
+            self.assertEqual(dl_a.status_code, 200)
+            self.assertIn('application/json', (dl_a.headers.get('Content-Type') or '').lower())
+            dl_s = client.get('/api/admin/manual-site-activity-log-archives/2099-12-31_23-59-59')
+            self.assertEqual(dl_s.status_code, 200)
+
     def test_manual_export_invalid_snapshot_key_falls_back_to_server_utc(self):
         app = self.create_app()
         archive_root = Path(self._tempdirs[-1].name) / 'manual_archives_fallback'
@@ -1131,7 +1192,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         admin_id = self.create_user(
             app,
             full_name='Admin Fallback',
-            email='fallback-manual@example.com',
+            email='fallback-manual@progyx.pro',
             password='AdminPass123!',
             role='admin',
             age_group='adult',
@@ -1154,7 +1215,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             db.session.commit()
 
         with app.test_client() as client:
-            login_response = self.login(client, 'fallback-manual@example.com', 'AdminPass123!')
+            login_response = self.login(client, 'fallback-manual@progyx.pro', 'AdminPass123!')
             self.assertEqual(login_response.status_code, 200)
             resp = client.post(
                 '/api/admin/audit-log-archives/export-manual',
@@ -1174,7 +1235,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
         admin_id = self.create_user(
             app,
             full_name='Admin User',
-            email='zeta@example.com',
+            email='zeta@progyx.pro',
             password='AdminPass123!',
             role='admin',
             age_group='adult',
@@ -1191,7 +1252,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
                     entity_type='user',
                     entity_id=2,
                     entity_label='target',
-                    details_json={'actor_email': 'zeta@example.com', 'actor_name': 'Admin User'},
+                    details_json={'actor_email': 'zeta@progyx.pro', 'actor_name': 'Admin User'},
                 )
             )
             db.session.add(
@@ -1207,7 +1268,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             db.session.commit()
 
         with app.test_client() as client:
-            login_response = self.login(client, 'zeta@example.com', 'AdminPass123!')
+            login_response = self.login(client, 'zeta@progyx.pro', 'AdminPass123!')
             self.assertEqual(login_response.status_code, 200)
 
             r_sort = client.get('/api/admin/audit-logs?sort=action&order=asc&page=1&page_size=20')

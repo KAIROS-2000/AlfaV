@@ -9,10 +9,13 @@ from ..core.db import db
 from .lesson_builder import build_lesson_quiz
 from ..core.security import (
     ADMIN_PASSWORD_MIN_LENGTH,
+    STAFF_EMAIL_DOMAIN_REQUIRED_CODE,
     auth_required,
     hash_password,
     invalidate_session_version_cache,
+    is_corporate_staff_email,
     revoke_refresh_tokens_for_user,
+    staff_email_domain,
     validate_password,
 )
 from ..models.learning import (
@@ -1157,6 +1160,13 @@ def create_admin(current_user: User):
     password_error = validate_password(password, minimum_length=ADMIN_PASSWORD_MIN_LENGTH)
     if not email:
         return {'message': 'Укажите email нового администратора.'}, 400
+    # Admins are staff: only corporate addresses are allowed. Password policy and
+    # superadmin authorization (the @auth_required above) are left untouched.
+    if not is_corporate_staff_email(email):
+        return {
+            'message': f'Создавать администраторов можно только с корпоративной почтой @{staff_email_domain()}.',
+            'code': STAFF_EMAIL_DOMAIN_REQUIRED_CODE,
+        }, 400
     if password_error:
         return {'message': password_error}, 400
 
@@ -1415,6 +1425,8 @@ def list_audit_log_archives(current_user: User):
     from ..services.audit_log_archive import (
         get_archive_dir,
         list_archive_dates,
+        list_manual_audit_snapshot_keys,
+        list_manual_site_activity_snapshot_keys,
         list_site_activity_archive_dates,
     )
 
@@ -1422,6 +1434,8 @@ def list_audit_log_archives(current_user: User):
     return {
         'dates': list_archive_dates(archive_dir),
         'site_activity_dates': list_site_activity_archive_dates(archive_dir),
+        'manual_audit_snapshots': list_manual_audit_snapshot_keys(archive_dir),
+        'manual_site_activity_snapshots': list_manual_site_activity_snapshot_keys(archive_dir),
         'export_hour_utc': current_app.config.get('AUDIT_LOG_DAILY_EXPORT_HOUR_UTC', 3),
     }
 
@@ -1448,6 +1462,41 @@ def export_manual_audit_log_archives(current_user: User):
     except Exception:  # noqa: BLE001
         current_app.logger.exception('manual audit export failed')
         return {'message': 'Не удалось выполнить выгрузку журналов. См. логи сервера.'}, 500
+
+
+@admin_bp.get('/manual-audit-log-archives/<string:snapshot_key>')
+@auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
+def download_manual_audit_log_archive(current_user: User, snapshot_key: str):
+    from ..services.audit_log_archive import get_archive_dir, resolve_manual_audit_archive_file
+
+    path = resolve_manual_audit_archive_file(get_archive_dir(), snapshot_key)
+    if not path or not path.is_file():
+        return {'message': 'Досрочный архив аудита не найден.'}, 404
+    return send_file(
+        str(path),
+        mimetype='application/json',
+        as_attachment=True,
+        download_name=path.name,
+    )
+
+
+@admin_bp.get('/manual-site-activity-log-archives/<string:snapshot_key>')
+@auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
+def download_manual_site_activity_log_archive(current_user: User, snapshot_key: str):
+    from ..services.audit_log_archive import (
+        get_archive_dir,
+        resolve_manual_site_activity_archive_file,
+    )
+
+    path = resolve_manual_site_activity_archive_file(get_archive_dir(), snapshot_key)
+    if not path or not path.is_file():
+        return {'message': 'Досрочный архив журнала API не найден.'}, 404
+    return send_file(
+        str(path),
+        mimetype='application/json',
+        as_attachment=True,
+        download_name=path.name,
+    )
 
 
 @admin_bp.get('/audit-log-archives/<string:date_key>')

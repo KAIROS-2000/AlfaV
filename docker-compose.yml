@@ -163,7 +163,8 @@ services:
       dockerfile: backend/Dockerfile
     restart: "no"
     volumes:
-      - ./media:/media:ro
+      # Writable: assignment covers, bug-hunter screenshots, etc. (`MEDIA_DIR=/media`).
+      - ./media:/media
     env_file:
       - .env
     secrets:
@@ -204,7 +205,8 @@ services:
       dockerfile: backend/Dockerfile
     restart: unless-stopped
     volumes:
-      - ./media:/media:ro
+      # Writable: assignment covers, bug-hunter screenshots, etc. (`MEDIA_DIR=/media`).
+      - ./media:/media
       # Журналы выгрузок (AUDIT_LOG_ARCHIVE_DIR по умолчанию): без этой монтировки файлы только внутри контейнера.
       - ./backend/logs/audit:/app/backend/logs/audit
     env_file:

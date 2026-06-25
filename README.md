@@ -7,6 +7,7 @@
 - регистрация и вход через backend-set `HttpOnly` session cookies
 - роли: `student`, `teacher`, `admin`, `superadmin`
 - **суперадмин** (роль `superadmin`): при `SUPERADMIN_BOOTSTRAP=true` и заданных `SUPERADMIN_EMAIL` / `SUPERADMIN_PASSWORD` учётка создаётся при `flask bootstrap-app` (в шаблоне `.env.example` для локалки задано по умолчанию; это не то же, что демо-админ из `DEMO_ADMIN_*` ниже)
+- **корпоративная почта сотрудников:** аккаунты с ролью `teacher` и `admin` регистрируются, создаются и входят только с адресом, оканчивающимся ровно на `@progyx.pro` (домен настраивается через `STAFF_EMAIL_DOMAIN`). Ученики и родители — с любой корректной почтой. Суперадмин не ограничен, чтобы не блокировать bootstrap/локальную учётку. Проверка живёт на бэкенде (`POST /api/auth/register`, `POST /api/admin/admins`, `POST /api/auth/login`); при отказе вход возвращает `403` с кодом `staff_email_domain_required`, фронтенд лишь подсказывает заранее
 - ученик: dashboard, roadmap, уроки, теория, практика, мини‑тесты, достижения, рейтинг, вступление в класс
 - teacher workflow: создание классов, назначение заданий, просмотр учеников, проверка сдач
 - teacher practice builder: ручная проверка, авто‑проверка по ключевым словам и настоящие автотесты для `Python`/`JavaScript`
@@ -73,6 +74,8 @@ NEXT_PUBLIC_APP_ENV=development
 NEXT_PUBLIC_API_URL=http://localhost:3000/api
 INTERNAL_API_URL=http://localhost:8000/api
 CLIENT_URL=http://localhost:3000
+# Корпоративный домен сотрудников (teacher/admin). Пустое значение отключает проверку.
+STAFF_EMAIL_DOMAIN=progyx.pro
 CODE_JUDGE_PYTHON_BIN=python
 CODE_JUDGE_NODE_BIN=node
 CODE_JUDGE_RUNNER_URL=http://localhost:8090/execute
@@ -91,13 +94,15 @@ CODE_JUDGE_ALLOW_LOCAL_FALLBACK=false
 ENABLE_DEMO_DATA=true
 DEMO_STUDENT_EMAIL=student@codequest.local
 DEMO_STUDENT_PASSWORD=Student123!
-DEMO_TEACHER_EMAIL=teacher@codequest.local
+DEMO_TEACHER_EMAIL=teacher@progyx.pro
 DEMO_TEACHER_PASSWORD=Teacher123!
-DEMO_ADMIN_EMAIL=admin@codequest.local
+DEMO_ADMIN_EMAIL=admin@progyx.pro
 DEMO_ADMIN_PASSWORD=Admin123!
 DEMO_CLASS_CODE=CLASS5B
 DEMO_PARENT_CODE=PAR-DEMO2026
 ```
+
+> Демо-учитель и демо-админ используют корпоративный домен `@progyx.pro`, иначе вход для ролей `teacher`/`admin` будет заблокирован (`staff_email_domain_required`). Демо-ученик может быть на любом домене. Чтобы оставить демо-почту на другом домене, задайте под него `STAFF_EMAIL_DOMAIN` или очистите его.
 
 Тогда будут доступны сценарии:
 

@@ -18,6 +18,14 @@ def _as_bool(value: str | None, default: bool = False) -> bool:
     return value.strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def _staff_email_domain(raw: str | None, default: str = 'progyx.pro') -> str:
+    # Unset (None) keeps the default gate ON. An explicit empty/whitespace value
+    # disables the gate. A leading '@' is optional and the result is lowercased.
+    if raw is None:
+        return default
+    return raw.strip().lstrip('@').lower()
+
+
 def _env(name: str) -> str | None:
     value = os.getenv(name)
     if value is None:
@@ -116,6 +124,14 @@ class Config:
     SUPERADMIN_EMAIL = (_env('SUPERADMIN_EMAIL') or ('' if IS_PRODUCTION else 'superadmin@codequest.local')).lower()
     SUPERADMIN_PASSWORD = _env('SUPERADMIN_PASSWORD') or ('' if IS_PRODUCTION else 'LocalOnlySuperAdmin123!')
     SUPERADMIN_NAME = _env('SUPERADMIN_NAME') or 'Главный администратор'
+    # Staff (teacher/admin) accounts may register/log in only with a corporate
+    # address ending exactly in @<STAFF_EMAIL_DOMAIN>. A leading '@' is optional
+    # and the value is normalized to lowercase. Unset keeps the default below;
+    # an explicit empty value disables the gate. Superadmin is intentionally
+    # exempt (see core/security.py) so the bootstrap/local superadmin is never
+    # locked out. Subdomains like user@school.progyx.pro are rejected unless the
+    # domain is widened here.
+    STAFF_EMAIL_DOMAIN = _staff_email_domain(os.getenv('STAFF_EMAIL_DOMAIN'))
     ENABLE_DEMO_DATA = _as_bool(
         os.getenv('ENABLE_DEMO_DATA'),
         default=not IS_PRODUCTION,
@@ -227,3 +243,4 @@ class Config:
         default=True,
     )
     ENABLE_SITE_ACTIVITY_LOG = _as_bool(os.getenv('ENABLE_SITE_ACTIVITY_LOG'), default=True)
+    BUG_HUNTER_APPROVED_XP = max(0, int(_env('BUG_HUNTER_APPROVED_XP') or '40'))

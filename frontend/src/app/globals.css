@@ -2163,6 +2163,9 @@ html[data-theme='dark'] .auth-switch-button:hover {
 	position: sticky;
 	top: 0;
 	z-index: 60;
+	width: 100%;
+	max-width: 100%;
+	overflow-x: clip;
 	border-bottom: 1px solid var(--progyx-border);
 	background: rgba(251, 253, 255, 0.84);
 	backdrop-filter: blur(16px);
@@ -2177,17 +2180,15 @@ html[data-theme='dark'] .auth-switch-button:hover {
 	margin-inline: auto;
 	padding-top: max(var(--safe-top), 0px);
 	padding-inline: clamp(0.4rem, 1.35vw, 0.85rem);
+	padding-bottom: 0.35rem;
 	min-height: 4.35rem;
 	display: flex;
-	flex-wrap: nowrap;
+	flex-wrap: wrap;
 	align-items: center;
+	align-content: center;
 	gap: 0.6rem;
-	overflow-x: auto;
-	scrollbar-width: none;
-}
-
-.progyx-header__shell::-webkit-scrollbar {
-	display: none;
+	row-gap: 0.45rem;
+	overflow: visible;
 }
 
 .progyx-header__brand {
@@ -2234,16 +2235,13 @@ html[data-theme='dark'] .auth-switch-button:hover {
 .progyx-header__nav {
 	display: flex;
 	flex: 1 1 auto;
-	flex-wrap: nowrap;
+	flex-wrap: wrap;
 	justify-content: center;
+	align-content: center;
 	gap: 0.35rem;
+	row-gap: 0.3rem;
 	min-width: 0;
-	overflow-x: auto;
-	scrollbar-width: none;
-}
-
-.progyx-header__nav::-webkit-scrollbar {
-	display: none;
+	overflow: visible;
 }
 
 .progyx-header__link {
@@ -2272,6 +2270,57 @@ html[data-theme='dark'] .auth-switch-button:hover {
 .progyx-header__link--active {
 	background: var(--progyx-blue-soft);
 	color: var(--progyx-blue);
+}
+
+.progyx-header--stacked:not(.progyx-header--mobile-drawer) .progyx-header__shell--stacked {
+	flex-wrap: wrap;
+	align-items: center;
+	row-gap: 0.5rem;
+	padding-bottom: 0.65rem;
+	overflow: visible;
+}
+
+.progyx-header--stacked:not(.progyx-header--mobile-drawer)
+	.progyx-header__shell--stacked
+	.progyx-header__brand {
+	flex: 1 1 min(14rem, 100%);
+	min-width: 0;
+}
+
+.progyx-header--stacked:not(.progyx-header--mobile-drawer)
+	.progyx-header__shell--stacked
+	.progyx-header__brand-title {
+	white-space: normal;
+}
+
+.progyx-header--stacked:not(.progyx-header--mobile-drawer)
+	.progyx-header__shell--stacked
+	.progyx-header__nav--stacked {
+	order: 3;
+	flex: 1 0 100%;
+	width: 100%;
+	max-width: 100%;
+	justify-content: flex-start;
+	flex-wrap: wrap;
+	align-content: flex-start;
+	overflow: visible;
+	row-gap: 0.35rem;
+	padding-bottom: 0;
+}
+
+.progyx-header--stacked:not(.progyx-header--mobile-drawer)
+	.progyx-header__shell--stacked
+	.progyx-header__actions {
+	margin-left: auto;
+	flex-wrap: nowrap;
+	justify-content: flex-end;
+}
+
+.progyx-header--with-sidebar:not(.progyx-header--mobile-drawer)
+	.progyx-header__nav--with-sidebar {
+	flex: 1 1 auto;
+	justify-content: center;
+	overflow: visible;
 }
 
 .progyx-header__actions {
@@ -2861,13 +2910,9 @@ html[data-theme='dark'] .progyx-header__sidebar-link--active {
 	.progyx-header--mobile-drawer .progyx-header__nav--compact {
 		justify-content: flex-start;
 		gap: 0.3rem;
-		flex-wrap: nowrap;
-		overflow-x: auto;
-		scrollbar-width: none;
-	}
-
-	.progyx-header--mobile-drawer .progyx-header__nav--compact::-webkit-scrollbar {
-		display: none;
+		flex-wrap: wrap;
+		overflow: visible;
+		row-gap: 0.3rem;
 	}
 
 	.progyx-header--mobile-drawer .progyx-header__nav--compact .progyx-header__link {
@@ -8285,11 +8330,28 @@ html[data-theme='dark'] .it-career-market__ticker span {
 		bottom: calc(1rem + var(--safe-bottom)) !important;
 	}
 
-	.progyx-header__nav {
-		overflow-x: auto;
-		flex-wrap: nowrap;
+	.progyx-header:not(.progyx-header--mobile-drawer):not(.progyx-header--stacked)
+		.progyx-header__shell:not(.progyx-header__shell--mobile-drawer):not(
+			.progyx-header__shell--stacked
+		) {
+		flex-wrap: wrap;
+		row-gap: 0.5rem;
+		padding-bottom: 0.65rem;
+		overflow: visible;
+	}
+
+	.progyx-header:not(.progyx-header--mobile-drawer):not(.progyx-header--stacked)
+		.progyx-header__shell:not(.progyx-header__shell--mobile-drawer):not(
+			.progyx-header__shell--stacked
+		)
+		.progyx-header__nav:not(.progyx-header__nav--stacked) {
+		order: 3;
+		flex: 1 0 100%;
 		justify-content: flex-start;
-		padding-bottom: 0.2rem;
+		flex-wrap: wrap;
+		overflow: visible;
+		row-gap: 0.35rem;
+		padding-bottom: 0;
 	}
 
 	.home-poster__frame {
@@ -8317,32 +8379,10 @@ html[data-theme='dark'] .it-career-market__ticker span {
 }
 
 @media (max-width: 900px) {
-	.progyx-header__shell {
-		flex-wrap: wrap;
-		align-items: center;
+	.progyx-header:not(.progyx-header--mobile-drawer)
+		.progyx-header__shell:not(.progyx-header__shell--mobile-drawer) {
 		row-gap: 0.55rem;
 		padding-bottom: 0.7rem;
-		overflow: visible;
-	}
-
-	.progyx-header__brand {
-		flex: 1 1 min(14rem, 100%);
-	}
-
-	.progyx-header__brand-title {
-		white-space: normal;
-	}
-
-	.progyx-header__nav {
-		order: 3;
-		flex: 1 0 100%;
-		justify-content: flex-start;
-	}
-
-	.progyx-header__actions {
-		margin-left: auto;
-		flex-wrap: wrap;
-		justify-content: flex-end;
 	}
 
 	.brand-lesson-nav {
