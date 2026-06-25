@@ -1,4 +1,5 @@
 import os
+import secrets
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -97,7 +98,11 @@ def resolve_jwt_signing_keys(secret_key: str, current_key_id: str, raw_keyring: 
 class Config:
     APP_ENV = (_env('APP_ENV') or 'production').lower()
     IS_PRODUCTION = APP_ENV == 'production'
-    SECRET_KEY = _env('SECRET_KEY') or 'dev-secret-key'
+    # No static fallback: an unset SECRET_KEY yields a fresh random key per process
+    # (dev sessions just don't survive a restart) instead of a predictable value an
+    # attacker could use to forge JWTs. Production additionally requires a strong
+    # explicit key via _validate_runtime_config().
+    SECRET_KEY = _env('SECRET_KEY') or secrets.token_urlsafe(48)
     JWT_SIGNING_KEY_ID = _env('JWT_SIGNING_KEY_ID') or 'default'
     JWT_SIGNING_KEYS = _env('JWT_SIGNING_KEYS') or ''
     SQLALCHEMY_DATABASE_URI = _env('DATABASE_URL') or _default_database_uri()

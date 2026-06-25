@@ -27,6 +27,18 @@ import { api, getApiErrorMessage } from '@/lib/api'
 import { useSessionUser } from '@/lib/auth-session'
 import type { UsefulAgeGroup, UsefulDifficulty, UsefulTaskItem, UsefulTaskListResponse } from '@/types'
 
+/** Returns the URL only if it is an absolute http(s) link; blocks javascript:/data:/etc. */
+function safeHttpUrl(raw: string | null | undefined): string | null {
+	const value = (raw || '').trim()
+	if (!value) return null
+	try {
+		const parsed = new URL(value)
+		return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? value : null
+	} catch {
+		return null
+	}
+}
+
 const AGE_GROUP_LABELS: Record<UsefulAgeGroup | 'all', string> = {
 	all: 'Все возрасты',
 	junior: '10–12 лет',
@@ -217,9 +229,9 @@ function TaskCard({ task }: { task: UsefulTaskItem }) {
 					))}
 				</div>
 
-				{task.external_url ? (
+				{safeHttpUrl(task.external_url) ? (
 					<a
-						href={task.external_url}
+						href={safeHttpUrl(task.external_url) as string}
 						target='_blank'
 						rel='noopener noreferrer'
 						className='mt-4 inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-sky-700 hover:shadow-md'

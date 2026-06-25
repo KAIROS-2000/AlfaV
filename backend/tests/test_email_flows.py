@@ -154,6 +154,27 @@ class EmailFlowsTests(unittest.TestCase):
         self._patcher.start()
         return app
 
+    def test_user_full_name_is_html_escaped_in_email(self):
+        """SEC-011: a user-controlled full_name must not inject markup into email HTML."""
+        app = self.create_app()
+        with app.test_client() as client:
+            resp = client.post(
+                '/api/auth/register',
+                json={
+                    'full_name': '<script>alert(1)</script>',
+                    'email': 'xss-name@example.com',
+                    'phone': '+7 (912) 345-67-90',
+                    'password': 'StrongPass123!',
+                    'role': 'student',
+                    'age_group': 'middle',
+                },
+            )
+            self.assertEqual(resp.status_code, 201, resp.get_json())
+        self.assertTrue(self._mailer.calls, 'expected a verification email to be recorded')
+        html = self._mailer.calls[-1]['html']
+        self.assertNotIn('<script>alert(1)</script>', html)
+        self.assertIn('&lt;script&gt;', html)
+
     def _register_student(self, client, email='student@example.com'):
         return client.post(
             '/api/auth/register',

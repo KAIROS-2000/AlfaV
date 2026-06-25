@@ -1,5 +1,11 @@
 name: ci
 
+# Least-privilege GITHUB_TOKEN: this workflow only builds and tests, so it needs
+# read-only access to repo contents. Without this block the token defaults to the
+# repository setting, which is often read/write. Grant more per-job if ever needed.
+permissions:
+  contents: read
+
 # AUDIT C-10 (open): SECRET_KEY and DATABASE_URL credentials below are CI-only fixtures.
 # Production deployments MUST set these via the operator's `.env`/Docker secrets.
 # Recommended hardening: move SECRET_KEY into GitHub Actions Secrets and reference as

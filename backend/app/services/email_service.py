@@ -24,6 +24,7 @@ import json
 import logging
 import socket
 from dataclasses import dataclass
+from html import escape
 from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -109,18 +110,27 @@ _MUTED_STYLES = "color:#475569;font-size:14px;"
 
 def _render_card(*, heading: str, intro: str, button_label: str, action_url: str, expiration_note: str, ignore_note: str) -> tuple[str, str]:
     platform = _platform_name()
+    # HTML-escape every dynamic value before interpolating into the markup so a
+    # user-controlled field (e.g. full_name carried inside `intro`) cannot inject
+    # tags or links into the outgoing email. The plaintext part below stays raw.
+    h_platform = escape(platform)
+    h_heading = escape(heading)
+    h_intro = escape(intro)
+    h_button = escape(button_label)
+    h_expiration = escape(expiration_note)
+    h_ignore = escape(ignore_note)
     safe_url = action_url.replace('"', '&quot;')
     html = (
         f"<!doctype html><html><body style=\"background:#f1f5f9;margin:0;padding:24px;{_BASE_STYLES}\">"
         f"<div style=\"{_CARD_STYLES}\">"
-        f"<p style=\"font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:12px;color:#0284c7;margin:0 0 16px;\">{platform}</p>"
-        f"<h1 style=\"margin:0 0 16px;font-size:24px;line-height:1.3;\">{heading}</h1>"
-        f"<p style=\"margin:0 0 24px;\">{intro}</p>"
-        f"<p style=\"margin:0 0 24px;\"><a href=\"{safe_url}\" style=\"{_BUTTON_STYLES}\">{button_label}</a></p>"
+        f"<p style=\"font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:12px;color:#0284c7;margin:0 0 16px;\">{h_platform}</p>"
+        f"<h1 style=\"margin:0 0 16px;font-size:24px;line-height:1.3;\">{h_heading}</h1>"
+        f"<p style=\"margin:0 0 24px;\">{h_intro}</p>"
+        f"<p style=\"margin:0 0 24px;\"><a href=\"{safe_url}\" style=\"{_BUTTON_STYLES}\">{h_button}</a></p>"
         f"<p style=\"margin:0 0 16px;{_MUTED_STYLES}\">Если кнопка не работает, скопируйте ссылку:<br/>"
-        f"<span style=\"word-break:break-all;color:#0f172a;\">{action_url}</span></p>"
-        f"<p style=\"margin:0 0 8px;{_MUTED_STYLES}\">{expiration_note}</p>"
-        f"<p style=\"margin:0;{_MUTED_STYLES}\">{ignore_note}</p>"
+        f"<span style=\"word-break:break-all;color:#0f172a;\">{escape(action_url)}</span></p>"
+        f"<p style=\"margin:0 0 8px;{_MUTED_STYLES}\">{h_expiration}</p>"
+        f"<p style=\"margin:0;{_MUTED_STYLES}\">{h_ignore}</p>"
         f"</div></body></html>"
     )
     text = (
@@ -176,14 +186,18 @@ def render_parent_welcome_email(user: User, raw_password: str, raw_token: str) -
     safe_password = (
         raw_password.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     )
+    # User-controlled fields are HTML-escaped for the markup; plaintext body keeps raw values.
+    h_platform = escape(platform)
+    h_full_name = escape(full_name)
+    h_email = escape(user.email)
 
     html = (
         f"<!doctype html><html><body style=\"background:#f1f5f9;margin:0;padding:24px;{_BASE_STYLES}\">"
         f"<div style=\"{_CARD_STYLES}\">"
-        f"<p style=\"font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:12px;color:#0284c7;margin:0 0 16px;\">{platform}</p>"
+        f"<p style=\"font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:12px;color:#0284c7;margin:0 0 16px;\">{h_platform}</p>"
         f"<h1 style=\"margin:0 0 16px;font-size:24px;line-height:1.3;\">Семейный кабинет создан</h1>"
-        f"<p style=\"margin:0 0 16px;\">Здравствуйте, {full_name}! Мы создали для вас семейный кабинет в {platform}.</p>"
-        f"<p style=\"margin:0 0 8px;font-weight:600;\">Ваш логин: <span style=\"color:#0f172a;\">{user.email}</span></p>"
+        f"<p style=\"margin:0 0 16px;\">Здравствуйте, {h_full_name}! Мы создали для вас семейный кабинет в {h_platform}.</p>"
+        f"<p style=\"margin:0 0 8px;font-weight:600;\">Ваш логин: <span style=\"color:#0f172a;\">{h_email}</span></p>"
         f"<p style=\"margin:0 0 24px;font-weight:600;\">Временный пароль: "
         f"<code style=\"display:inline-block;padding:4px 10px;border-radius:8px;background:#0f172a;color:#f8fafc;font-size:15px;letter-spacing:0.04em;\">{safe_password}</code></p>"
         f"<p style=\"margin:0 0 16px;\">Сейчас вы уже вошли в кабинет в браузере. Сохраните пароль — он понадобится для входа с другого устройства.</p>"
@@ -261,8 +275,8 @@ def render_child_achievement_email(
     achievement_items_html = ''.join(
         (
             f"<li style=\"margin:0 0 12px;padding:12px 16px;border-radius:14px;background:#f1f5f9;\">"
-            f"<p style=\"margin:0 0 4px;font-weight:700;color:#0f172a;\">{ach.name}</p>"
-            f"<p style=\"margin:0;color:#475569;font-size:14px;\">{(ach.description or '').strip()}</p>"
+            f"<p style=\"margin:0 0 4px;font-weight:700;color:#0f172a;\">{escape(ach.name)}</p>"
+            f"<p style=\"margin:0;color:#475569;font-size:14px;\">{escape((ach.description or '').strip())}</p>"
             + (
                 f"<p style=\"margin:6px 0 0;color:#0284c7;font-size:13px;font-weight:600;\">+{int(ach.xp_reward or 0)} XP</p>"
                 if int(ach.xp_reward or 0) > 0
@@ -286,27 +300,33 @@ def render_child_achievement_email(
         f"{capped[0].name}!"
     )
     safe_share = share_text.replace('"', '&quot;')
+    # HTML-escape user-controlled fields (child/parent names, share text) for the markup;
+    # the plaintext body below keeps raw values.
+    h_platform = escape(platform)
+    h_child_first = escape(child_first)
+    h_intro = escape(intro)
+    h_share_text = escape(share_text)
 
     html = (
         f"<!doctype html><html><body style=\"background:#f1f5f9;margin:0;padding:24px;{_BASE_STYLES}\">"
         f"<div style=\"{_CARD_STYLES}\">"
-        f"<p style=\"font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:12px;color:#0284c7;margin:0 0 16px;\">{platform}</p>"
+        f"<p style=\"font-weight:700;letter-spacing:0.18em;text-transform:uppercase;font-size:12px;color:#0284c7;margin:0 0 16px;\">{h_platform}</p>"
         f"<h1 style=\"margin:0 0 16px;font-size:24px;line-height:1.3;\">"
-        f"{('Новые достижения у ' + child_first) if multiple else ('Достижение у ' + child_first)}"
+        f"{('Новые достижения у ' + h_child_first) if multiple else ('Достижение у ' + h_child_first)}"
         f"</h1>"
-        f"<p style=\"margin:0 0 20px;\">{intro}</p>"
+        f"<p style=\"margin:0 0 20px;\">{h_intro}</p>"
         f"<ul style=\"margin:0 0 20px;padding:0;list-style:none;\">{achievement_items_html}</ul>"
         f"{extra_note_html}"
         f"<p style=\"margin:0 0 24px;\"><a href=\"{safe_url}\" style=\"{_BUTTON_STYLES}\">Посмотреть в кабинете</a></p>"
         f"<p style=\"margin:0 0 16px;{_MUTED_STYLES}\">Если кнопка не работает, скопируйте ссылку:<br/>"
-        f"<span style=\"word-break:break-all;color:#0f172a;\">{action_url}</span></p>"
+        f"<span style=\"word-break:break-all;color:#0f172a;\">{escape(action_url)}</span></p>"
         f"<div style=\"margin:0 0 12px;padding:12px 16px;border-radius:14px;background:#ecfeff;border:1px solid #a5f3fc;\">"
         f"<p style=\"margin:0 0 6px;font-weight:700;color:#0e7490;font-size:14px;\">Поделитесь радостью</p>"
         f"<p style=\"margin:0 0 6px;color:#155e75;font-size:13px;line-height:1.5;\">"
         f"Маленькая похвала закрепляет привычку учиться. Расскажите близким:"
         f"</p>"
         f"<p style=\"margin:0;padding:8px 12px;border-radius:10px;background:#ffffff;color:#0f172a;font-size:13px;\">"
-        f"«{share_text}»"
+        f"«{h_share_text}»"
         f"</p></div>"
         f"<p style=\"margin:0;{_MUTED_STYLES}\">"
         "Это автоматическое письмо из семейного кабинета. Отключить уведомления можно в настройках кабинета."

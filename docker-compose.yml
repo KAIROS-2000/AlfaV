@@ -204,6 +204,12 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     restart: unless-stopped
+    # Hardening: drop all Linux capabilities and block privilege escalation. The
+    # app runs as a non-root user and binds an unprivileged port, so it needs none.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       # Writable: assignment covers, bug-hunter screenshots, etc. (`MEDIA_DIR=/media`).
       - ./media:/media
@@ -243,7 +249,10 @@ services:
       judge-runner:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      # Loopback-only: reachable for local dev/debugging but not published on all
+      # host interfaces. In production, front the backend via the frontend / a
+      # reverse proxy rather than exposing the API port directly.
+      - "127.0.0.1:8000:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2).read()"]
       interval: 10s
@@ -262,6 +271,10 @@ services:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
         INTERNAL_API_URL: http://backend:8000/api
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       NODE_ENV: production
       APP_ENV: ${APP_ENV:-development}

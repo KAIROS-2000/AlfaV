@@ -36,10 +36,6 @@ function responseCookieHeaders(response: Response) {
   return fallback ? [fallback] : []
 }
 
-function requestOrigin(request: NextRequest) {
-  return request.headers.get('origin')?.trim() || request.nextUrl.origin
-}
-
 async function forwardRequest(
   request: NextRequest,
   context: { params: Promise<{ path: string[] }> },
@@ -66,10 +62,12 @@ async function forwardRequest(
 
   const method = request.method.toUpperCase()
   if (UNSAFE_METHODS.has(method)) {
-    upstreamHeaders.set('origin', requestOrigin(request))
-    const csrfCookie = request.cookies.get('csrf_token')?.value?.trim()
-    const csrfFromClient = request.headers.get(CSRF_HEADER)?.trim()
-    const csrf = csrfCookie || csrfFromClient
+    // Pin Origin to this app's own origin (don't echo the client's header), and
+    // forward ONLY the client-supplied CSRF header. Deriving the header from the
+    // csrf_token cookie here would defeat the backend's double-submit check —
+    // the browser client (lib/api.ts) now sends X-CSRF-Token from the cookie.
+    upstreamHeaders.set('origin', request.nextUrl.origin)
+    const csrf = request.headers.get(CSRF_HEADER)?.trim()
     if (csrf) {
       upstreamHeaders.set(CSRF_HEADER, csrf)
     }
