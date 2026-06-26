@@ -33,7 +33,17 @@ from ..models.learning import (
     normalize_task_validation,
 )
 from ..models.messaging import Conversation, ConversationReadState, Message
-from ..models.parent_cabinet import ParentChildLink, ParentLinkCode
+from ..models.parent_cabinet import (
+    ParentChildLink,
+    ParentConsentSettings,
+    ParentLinkCode,
+    ParentNotification,
+    ParentSafetySettings,
+    ParentTeacherReadState,
+    ParentTeacherThread,
+)
+from ..models.staff_messaging import StaffDirectThread
+from ..models.support import SupportTicket
 from ..models.user import (
     TEACHER_APPROVAL_APPROVED,
     TEACHER_APPROVAL_PENDING,
@@ -271,6 +281,62 @@ def _delete_managed_user_dependencies(user: User) -> dict:
     classroom_ids: list[int] = []
     deleted_conversations = 0
     deleted_custom_modules = 0
+
+    # --- H4: remove rows whose FK to users.id is NOT NULL with no DB-level
+    # ondelete, so deleting a user with support tickets / staff or parent-teacher
+    # threads / parent-child links no longer fails with an IntegrityError.
+    # (BugHunterReport.user_id, UserOwnedCosmetic.user_id and MediaAsset.uploaded_by_id
+    # already declare ondelete CASCADE / SET NULL and are handled by the database.)
+    # This runs BEFORE classroom deletion below because ParentTeacherThread.classroom_id
+    # references classrooms.id.
+    for ticket in SupportTicket.query.filter_by(user_id=user.id).all():
+        db.session.delete(ticket)  # cascades support_ticket_messages + read_states
+    for sd_thread in StaffDirectThread.query.filter(
+        or_(StaffDirectThread.user_low_id == user.id, StaffDirectThread.user_high_id == user.id)
+    ).all():
+        db.session.delete(sd_thread)  # cascades staff_direct_messages + read_states
+    pt_threads = ParentTeacherThread.query.filter(
+        or_(
+            ParentTeacherThread.parent_user_id == user.id,
+            ParentTeacherThread.teacher_id == user.id,
+            ParentTeacherThread.child_user_id == user.id,
+        )
+    ).all()
+    pt_thread_ids = [t.id for t in pt_threads]
+    if pt_thread_ids:
+        # ParentTeacherReadState is NOT cascaded from the thread — clear every
+        # participant's read-state for these threads first.
+        ParentTeacherReadState.query.filter(
+            ParentTeacherReadState.thread_id.in_(pt_thread_ids)
+        ).delete(synchronize_session=False)
+    ParentTeacherReadState.query.filter(ParentTeacherReadState.user_id == user.id).delete(
+        synchronize_session=False
+    )
+    db.session.flush()
+    for pt_thread in pt_threads:
+        db.session.delete(pt_thread)  # cascades parent_teacher_messages
+    ParentChildLink.query.filter(
+        or_(ParentChildLink.parent_user_id == user.id, ParentChildLink.child_user_id == user.id)
+    ).delete(synchronize_session=False)
+    ParentSafetySettings.query.filter(
+        or_(
+            ParentSafetySettings.parent_user_id == user.id,
+            ParentSafetySettings.child_user_id == user.id,
+        )
+    ).delete(synchronize_session=False)
+    ParentConsentSettings.query.filter(
+        or_(
+            ParentConsentSettings.parent_user_id == user.id,
+            ParentConsentSettings.child_user_id == user.id,
+        )
+    ).delete(synchronize_session=False)
+    ParentNotification.query.filter(
+        or_(
+            ParentNotification.parent_user_id == user.id,
+            ParentNotification.child_user_id == user.id,
+        )
+    ).delete(synchronize_session=False)
+    db.session.flush()
 
     if user.role == UserRole.TEACHER:
         classrooms = Classroom.query.filter_by(teacher_id=user.id).all()

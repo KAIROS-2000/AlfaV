@@ -79,6 +79,49 @@ def _ensure_safety_and_consent(parent_id: int, child_id: int) -> None:
         )
 
 
+# --- Consent gating (H1/H2) ---------------------------------------------------
+# `allow_learning_analytics_display` and `allow_achievement_sharing` must gate
+# EVERY data surface, not just `/digest` — otherwise a parent can read the same
+# analytics by hitting /summary, /activity, /skills, /practice-history,
+# /dashboard or /achievements directly. The consent row is materialised at link
+# time, so the no-row case is rare; we preserve the existing fail-open default
+# (allow when no row) and only enforce an explicit opt-out.
+_ANALYTICS_DISABLED_MESSAGE = "Отображение аналитики отключено в настройках согласия."
+_ACHIEVEMENTS_DISABLED_MESSAGE = "Показ достижений отключён в настройках согласия."
+_ZERO_SUMMARY = {
+    "completed_lessons": 0,
+    "average_score": 0,
+    "tasks_submitted": 0,
+    "current_level": 0,
+    "xp": 0,
+    "streak": 0,
+}
+
+
+def _consent_for(parent_id: int, child_id: int) -> ParentConsentSettings | None:
+    return ParentConsentSettings.query.filter_by(
+        parent_user_id=parent_id, child_user_id=child_id
+    ).first()
+
+
+def _analytics_display_allowed(parent_id: int, child_id: int) -> bool:
+    consent = _consent_for(parent_id, child_id)
+    return not (consent and not consent.allow_learning_analytics_display)
+
+
+def _achievement_sharing_allowed(parent_id: int, child_id: int) -> bool:
+    consent = _consent_for(parent_id, child_id)
+    return not (consent and not consent.allow_achievement_sharing)
+
+
+def _analytics_blocked_child_dict(child: User) -> dict:
+    """Child identity with progress-derived fields (level/rank) zeroed."""
+    data = child.to_parent_dict()
+    data["level"] = 0
+    data["rank_title"] = ""
+    return data
+
+
 @parent_bp.get("/dashboard")
 @auth_required([UserRole.PARENT])
 def parent_dashboard(user: User):
@@ -105,7 +148,10 @@ def parent_dashboard(user: User):
     if sample:
         child, err = _child_user_for_parent(user, int(sample))
         if child and not err:
-            payload["summary"] = parent_insights.compact_progress_report(child, NO_WHITELIST)
+            if _analytics_display_allowed(user.id, int(sample)):
+                payload["summary"] = parent_insights.compact_progress_report(child, NO_WHITELIST)
+            else:
+                payload["analytics_disabled"] = True
     return payload
 
 
@@ -229,29 +275,34 @@ def link_child(user: User):
         register_parent_link_redeem_failure(user.id)
         db.session.commit()
         return {"message": "Код недействителен."}, 400
+    # H3: consume the one-time code atomically — only the request that flips
+    # used_at from NULL wins. A concurrent redeem of the same code (Postgres
+    # READ COMMITTED) matches 0 rows and is rejected, so one code can never
+    # attach a child to more than one parent.
+    consumed = ParentLinkCode.query.filter(
+        ParentLinkCode.id == row.id, ParentLinkCode.used_at.is_(None)
+    ).update({ParentLinkCode.used_at: now}, synchronize_session=False)
+    if consumed != 1:
+        register_parent_link_redeem_failure(user.id)
+        db.session.commit()
+        return {"message": "Код недействителен или срок его действия истёк."}, 400
+
     existing = _link_active(user.id, child.id)
     created = False
     if not existing:
-        link = ParentChildLink(
-            parent_user_id=user.id,
-            child_user_id=child.id,
-        )
-        db.session.add(link)
         try:
-            # Race-safe: UniqueConstraint(parent_user_id, child_user_id) prevents
-            # concurrent duplicates; we surface that as idempotent success.
-            db.session.flush()
+            # Savepoint so a concurrent-duplicate IntegrityError rolls back ONLY
+            # the link insert, preserving the used_at consumption above.
+            with db.session.begin_nested():
+                db.session.add(
+                    ParentChildLink(parent_user_id=user.id, child_user_id=child.id)
+                )
             created = True
         except IntegrityError:
-            db.session.rollback()
             existing = _link_active(user.id, child.id)
             if existing is None:
-                # Constraint conflict but no active row visible — surface as transient error
-                # rather than hiding it as success.
-                register_parent_link_redeem_failure(user.id)
                 db.session.commit()
                 return {"message": "Не удалось установить связь. Повторите попытку."}, 409
-    row.used_at = now
     _ensure_safety_and_consent(user.id, child.id)
     clear_parent_link_redeem_failures(user.id)
     db.session.commit()
@@ -285,6 +336,13 @@ def child_summary(user: User, child_id: int):
     if err:
         return err
     assert child is not None
+    if not _analytics_display_allowed(user.id, child_id):
+        return {
+            "child": _analytics_blocked_child_dict(child),
+            "summary": dict(_ZERO_SUMMARY),
+            "analytics_disabled": True,
+            "message": _ANALYTICS_DISABLED_MESSAGE,
+        }
     return {
         "child": child.to_parent_dict(),
         "summary": parent_insights.compact_progress_report(child, NO_WHITELIST),
@@ -323,6 +381,8 @@ def child_skills(user: User, child_id: int):
     if err:
         return err
     assert child is not None
+    if not _analytics_display_allowed(user.id, child_id):
+        return {"modules": [], "analytics_disabled": True, "message": _ANALYTICS_DISABLED_MESSAGE}
     rows = parent_insights.module_report(child, NO_WHITELIST)
     labels = {
         "mastered": "Уверенно получается",
@@ -342,6 +402,16 @@ def child_activity(user: User, child_id: int):
     if err:
         return err
     assert child is not None
+    if not _analytics_display_allowed(user.id, child_id):
+        return {
+            "this_week": [],
+            "previous_week": [],
+            "trend_text": _ANALYTICS_DISABLED_MESSAGE,
+            "streak": 0,
+            "activity_minutes_estimate": 0,
+            "analytics_disabled": True,
+            "message": _ANALYTICS_DISABLED_MESSAGE,
+        }
     week = parent_insights.weekly_activity(child, NO_WHITELIST)
     prev = parent_insights.weekly_activity_prev_week(child, NO_WHITELIST)
     return {
@@ -362,6 +432,8 @@ def child_practice_history(user: User, child_id: int):
     if err:
         return err
     assert child is not None
+    if not _analytics_display_allowed(user.id, child_id):
+        return {"items": [], "analytics_disabled": True, "message": _ANALYTICS_DISABLED_MESSAGE}
     return {"items": parent_insights.assignment_rows_for_parent(child, 50, NO_WHITELIST)}
 
 
@@ -540,6 +612,8 @@ def child_achievements(user: User, child_id: int):
     if err:
         return err
     assert child is not None
+    if not _achievement_sharing_allowed(user.id, child_id):
+        return {"achievements": [], "sharing_disabled": True, "message": _ACHIEVEMENTS_DISABLED_MESSAGE}
     items = (
         UserAchievement.query.filter_by(user_id=child_id)
         .order_by(UserAchievement.earned_at.desc())

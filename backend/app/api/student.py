@@ -1266,6 +1266,15 @@ def submit_assignment(current_user: User, assignment_id: int):
     existing = AssignmentSubmission.query.filter_by(
         assignment_id=assignment.id, student_id=current_user.id
     ).first()
+    # H6: once a teacher has reviewed and accepted the work ("checked"), a
+    # re-submission must NOT silently revert the grade/feedback back to the
+    # review queue. A teacher who wants changes sets "needs_revision", which
+    # still allows another attempt.
+    if existing and existing.status == "checked":
+        return {
+            "message": "Это задание уже проверено учителем и больше не принимает новые ответы.",
+            "code": "submission_already_checked",
+        }, 409
     score = 100 if len(answer.strip()) >= 10 else 60
     if existing:
         existing.answer = answer

@@ -136,6 +136,9 @@ def staff_moderate(
     note_clean = _clip_text(note or '', MAX_MODERATOR_NOTE_LEN) or None
 
     if new_status == BUG_REPORT_STATUS_APPROVED:
+        # H5: a moderator cannot approve their own report and grant themselves XP.
+        if row.user_id == moderator.id:
+            return {'message': 'Нельзя одобрить собственный репорт.'}, 403
         xp_amount = get_bug_hunter_approved_xp()
         reporter = db.session.get(User, row.user_id)
         if reporter is None:

@@ -52,7 +52,9 @@ def notify_achievements_earned(student: User, earned: list[Achievement]) -> None
         consent = ParentConsentSettings.query.filter_by(
             parent_user_id=link.parent_user_id, child_user_id=student.id
         ).first()
-        if consent and not consent.allow_notifications:
+        # H2: achievement fan-out (in-app + email) is muted when the parent has
+        # opted out of notifications OR of achievement sharing specifically.
+        if consent and (not consent.allow_notifications or not consent.allow_achievement_sharing):
             continue
         for ach in earned[:5]:
             first = student.full_name.split()[0] if student.full_name else "Ребёнок"
