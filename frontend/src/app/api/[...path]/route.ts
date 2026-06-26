@@ -62,11 +62,17 @@ async function forwardRequest(
 
   const method = request.method.toUpperCase()
   if (UNSAFE_METHODS.has(method)) {
-    // Pin Origin to this app's own origin (don't echo the client's header), and
-    // forward ONLY the client-supplied CSRF header. Deriving the header from the
-    // csrf_token cookie here would defeat the backend's double-submit check —
-    // the browser client (lib/api.ts) now sends X-CSRF-Token from the cookie.
-    upstreamHeaders.set('origin', request.nextUrl.origin)
+    // Forward the client's Origin VERBATIM (no fallback to a trusted origin):
+    // a real browser always sends it, and the backend allow-list rejects a
+    // foreign one. Falling back to the app's own origin when it's absent would
+    // let a cross-site request with no Origin borrow a trusted value and pass
+    // the backend check. And forward ONLY the client-supplied CSRF header —
+    // deriving it from the csrf_token cookie here would defeat the backend's
+    // double-submit check (the browser client now sends X-CSRF-Token itself).
+    const clientOrigin = request.headers.get('origin')?.trim()
+    if (clientOrigin) {
+      upstreamHeaders.set('origin', clientOrigin)
+    }
     const csrf = request.headers.get(CSRF_HEADER)?.trim()
     if (csrf) {
       upstreamHeaders.set(CSRF_HEADER, csrf)
