@@ -34,6 +34,8 @@ source alone).
 - **SEC-010** (CSP `style-src 'unsafe-inline'`): left as-is — Monaco editor injects `<style>` blocks at runtime, so tightening this risks breaking the code editor. Needs frontend testing.
 - **SEC-013** (no refresh-token rotation): current non-rotating design with a revocation list is acceptable; rotation + reuse-detection is a follow-up enhancement.
 - **SEC-008/009 (residual hardening)**: the exploitable lateral-movement path is closed (see above). A container-level seccomp *whitelist* (vs. the current allow-by-default denylist) and a one-way job queue / `backend→runner:8090`-only network policy remain recommended defence-in-depth, but are no longer required to close the finding.
+- **SEC-007** (rate-limiting keyed on the proxy IP): a correct fix needs a trusted edge reverse proxy that injects the real client IP, the Next proxy forwarding `X-Forwarded-For`, and `TRUST_PROXY=true`. Forwarding a client-supplied `X-Forwarded-For` *without* a trusted edge would let clients spoof their IP and **evade** per-IP limits — strictly worse than today — so this is intentionally deferred to a deployment-topology decision rather than patched blind.
+- **Low/Info backlog** (from the audit, not addressed in this change): SEC-017 (self-graded assignment auto-score, teacher review is the backstop), SEC-018 (regular admins control bug-hunter XP — confirm product intent), SEC-021 (no throttle on bug-reports), SEC-025 (CI `actions/*` pinned to tags, not commit SHAs).
 
 ## Verification
 
