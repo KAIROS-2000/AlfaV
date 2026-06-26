@@ -1,17 +1,18 @@
 # ---------------------------------------------------------------------------
 # ProgHUB / Progyx compose stack.
 #
-# Image pinning (P0-6): every `image:` / `FROM` reference in this repo uses a
-# floating tag. For production builds replace each tag with a digest-pinned
-# form (`@sha256:<digest>`). The Dockerfiles under backend/, frontend/, and
-# judge_runner/ include matching instructions. See:
+# Image pinning (SEC-019 / P0-6): every `image:` / `FROM` reference is digest-pinned
+# (`name:tag@sha256:<digest>`) for reproducible, tamper-evident builds. Refresh the
+# digests periodically with scripts/pin-images.sh, and keep the two python:3.12-slim
+# pins (backend + judge_runner) and the three node:22-alpine pins (frontend stages)
+# in sync. See:
 #   - docs/operations/image-pinning.md  (operator playbook)
 #   - scripts/pin-images.sh             (digest resolver)
 # ---------------------------------------------------------------------------
 services:
   db:
-    # pin: postgres:17  (replace with postgres:17@sha256:<digest> before prod)
-    image: postgres:17
+    # Digest-pinned (SEC-019). Refresh with scripts/pin-images.sh; keep db-backup in sync.
+    image: postgres:17@sha256:5f050f770b427fbd477edee6c3968a72e5c6be97e050a7e368b2b74a9494a285
     restart: unless-stopped
     environment:
       POSTGRES_DB: codequest
@@ -30,9 +31,9 @@ services:
       retries: 10
 
   redis:
-    # pin: redis:7-alpine  (replace with redis:7-alpine@sha256:<digest> before prod; see docs/operations/image-pinning.md)
+    # Digest-pinned (SEC-019); refresh with scripts/pin-images.sh. See docs/operations/image-pinning.md.
     # Redis 7.4.x does not support requirepass-file; read secret in shell, then --requirepass (see docs/operations/redis.md).
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     restart: unless-stopped
     command:
       - /bin/sh
@@ -60,8 +61,8 @@ services:
   # docs/operations/backup.md and docs/operations/dr.md.
   # ---------------------------------------------------------------------------
   db-backup:
-    # pin: postgres:17  (MUST match the `db` service digest)
-    image: postgres:17
+    # Digest-pinned (SEC-019); MUST match the `db` service digest.
+    image: postgres:17@sha256:5f050f770b427fbd477edee6c3968a72e5c6be97e050a7e368b2b74a9494a285
     restart: unless-stopped
     depends_on:
       db:
@@ -204,6 +205,12 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     restart: unless-stopped
+    # Hardening: drop all Linux capabilities and block privilege escalation. The
+    # app runs as a non-root user and binds an unprivileged port, so it needs none.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       # Writable: assignment covers, bug-hunter screenshots, etc. (`MEDIA_DIR=/media`).
       - ./media:/media
@@ -243,7 +250,10 @@ services:
       judge-runner:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      # Loopback-only: reachable for local dev/debugging but not published on all
+      # host interfaces. In production, front the backend via the frontend / a
+      # reverse proxy rather than exposing the API port directly.
+      - "127.0.0.1:8000:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2).read()"]
       interval: 10s
@@ -262,6 +272,10 @@ services:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
         INTERNAL_API_URL: http://backend:8000/api
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       NODE_ENV: production
       APP_ENV: ${APP_ENV:-development}

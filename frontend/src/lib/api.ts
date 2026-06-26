@@ -35,13 +35,47 @@ function resolveAuthMode(option: ApiAuthOption | undefined): AuthMode {
   return option?.auth ?? 'none'
 }
 
+const CSRF_COOKIE = 'csrf_token'
+const CSRF_HEADER = 'X-CSRF-Token'
+const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+function readCookie(name: string): string {
+  if (typeof document === 'undefined') return ''
+  const cookies = document.cookie ? document.cookie.split('; ') : []
+  for (const cookie of cookies) {
+    const eq = cookie.indexOf('=')
+    if (eq > -1 && cookie.slice(0, eq) === name) {
+      return decodeURIComponent(cookie.slice(eq + 1))
+    }
+  }
+  return ''
+}
+
+/**
+ * Attach the double-submit CSRF header from the (non-HttpOnly) csrf_token cookie
+ * for state-changing methods. The backend compares this header against the cookie,
+ * so the token must independently originate from JS here — the API proxy no longer
+ * derives it from the cookie on our behalf.
+ */
+function applyCsrfHeader(headers: Headers, method: string | undefined) {
+  const normalized = (method || 'GET').toUpperCase()
+  if (!UNSAFE_METHODS.has(normalized) || headers.has(CSRF_HEADER)) {
+    return headers
+  }
+  const token = readCookie(CSRF_COOKIE)
+  if (token) {
+    headers.set(CSRF_HEADER, token)
+  }
+  return headers
+}
+
 function buildHeaders(init?: RequestInit) {
   const headers = new Headers(init?.headers || {})
   const body = init?.body
   if (body && !(body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-  return headers
+  return applyCsrfHeader(headers, init?.method)
 }
 
 const SESSION_TERMINATION_CODES = new Set(['invalid_token', 'session_revoked', 'csrf_invalid'])
@@ -151,6 +185,7 @@ async function refreshSession() {
 
   refreshRequest = fetch(`${API_URL}/auth/refresh`, {
     method: 'POST',
+    headers: applyCsrfHeader(new Headers(), 'POST'),
     cache: 'no-store',
     credentials: 'same-origin',
   })
@@ -180,6 +215,7 @@ export async function clearSessionSilently(options: ClearSessionOptions = {}) {
   try {
     await fetch(`${API_URL}/auth/logout`, {
       method: 'POST',
+      headers: applyCsrfHeader(new Headers(), 'POST'),
       cache: 'no-store',
       credentials: 'same-origin',
     })

@@ -5,6 +5,7 @@ import json
 import hmac
 import math
 import os
+import platform
 import shutil
 import sys
 import threading
@@ -86,6 +87,64 @@ def _build_env() -> dict[str, str]:
     return env
 
 
+def _install_no_outbound_network_seccomp() -> bool:
+    """Block outbound ``connect(2)`` for the current process via a seccomp BPF filter.
+
+    Applied per-execution in the forked child (preexec, before exec) so the executed
+    user code cannot open network connections — closing the lateral-movement path to
+    the backend over the shared judge network and making any leaked runner token
+    useless. The runner process itself and the container healthcheck run in separate
+    processes and are unaffected.
+
+    Best-effort and conservative: returns ``False`` (leaving execution unfiltered) on
+    any non-x86_64 arch or if the filter cannot be installed, and uses
+    ``SECCOMP_RET_ERRNO`` (never ``KILL``) so a blocked call fails with ``EPERM``
+    rather than terminating the process. Standard Python/Node stdin→stdout programs
+    never call ``connect``.
+    """
+
+    if os.name != 'posix' or platform.machine() != 'x86_64':
+        return False
+    try:
+        import ctypes
+        import struct
+
+        libc = ctypes.CDLL('libc.so.6', use_errno=True)
+        PR_SET_NO_NEW_PRIVS = 38
+        PR_SET_SECCOMP = 22
+        SECCOMP_MODE_FILTER = 2
+        AUDIT_ARCH_X86_64 = 0xC000003E
+        NR_CONNECT = 42
+        SECCOMP_RET_ALLOW = 0x7FFF0000
+        SECCOMP_RET_ERRNO = 0x00050000
+        EPERM = 1
+
+        # PR_SET_SECCOMP without CAP_SYS_ADMIN requires no_new_privs first.
+        if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+            return False
+
+        # Allow everything except connect() on x86_64, which returns EPERM.
+        program = [
+            (0x20, 0, 0, 4),                                     # ld  seccomp_data.arch
+            (0x15, 0, 3, AUDIT_ARCH_X86_64),                     # jne x86_64 -> allow
+            (0x20, 0, 0, 0),                                     # ld  seccomp_data.nr
+            (0x15, 0, 1, NR_CONNECT),                            # jne connect -> allow
+            (0x06, 0, 0, SECCOMP_RET_ERRNO | (EPERM & 0xFFFF)),  # ret errno(EPERM)
+            (0x06, 0, 0, SECCOMP_RET_ALLOW),                     # ret allow
+        ]
+        blob = b''.join(struct.pack('<HBBI', *ins) for ins in program)
+
+        class _SockFprog(ctypes.Structure):
+            _fields_ = [('len', ctypes.c_ushort), ('filter', ctypes.c_char_p)]
+
+        fprog = _SockFprog(len(program), ctypes.c_char_p(blob))
+        if libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(fprog), 0, 0) != 0:
+            return False
+        return True
+    except Exception:  # noqa: BLE001 — defence-in-depth must never break execution
+        return False
+
+
 def _preexec_resource_limits(memory_limit_mb: int, time_limit_ms: int, language: str) -> Callable[[], None] | None:
     if os.name != 'posix':
         return None
@@ -104,6 +163,9 @@ def _preexec_resource_limits(memory_limit_mb: int, time_limit_ms: int, language:
             resource.setrlimit(resource.RLIMIT_AS, (memory_limit_bytes, memory_limit_bytes))
         if hasattr(resource, 'RLIMIT_CORE'):
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        # Defence-in-depth: block outbound network from the executed code so a
+        # sandbox-escape attempt cannot pivot to the backend over judge_net.
+        _install_no_outbound_network_seccomp()
 
     return apply_limits
 

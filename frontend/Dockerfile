@@ -6,16 +6,16 @@
 # docs/operations/image-pinning.md and scripts/pin-images.sh.
 # ---------------------------------------------------------------------------
 
-FROM node:22-alpine AS deps
-# pin: node:22-alpine  (replace with @sha256:<digest> before prod build)
+FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS deps
+# Digest-pinned (SEC-019); all three stages share this digest. Refresh with scripts/pin-images.sh.
 
 WORKDIR /app
 
 COPY package.json package-lock.json ./
 RUN npm ci
 
-FROM node:22-alpine AS builder
-# pin: node:22-alpine  (MUST match the deps stage digest)
+FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS builder
+# Digest-pinned (SEC-019); matches the deps stage digest.
 
 WORKDIR /app
 
@@ -36,8 +36,8 @@ RUN echo "frontend build cache bust: ${CACHEBUST}"
 COPY . .
 RUN npm run build
 
-FROM node:22-alpine AS runner
-# pin: node:22-alpine  (MUST match the deps/builder stage digest)
+FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS runner
+# Digest-pinned (SEC-019); matches the deps/builder stage digest.
 
 WORKDIR /app
 

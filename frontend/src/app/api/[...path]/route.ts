@@ -36,10 +36,6 @@ function responseCookieHeaders(response: Response) {
   return fallback ? [fallback] : []
 }
 
-function requestOrigin(request: NextRequest) {
-  return request.headers.get('origin')?.trim() || request.nextUrl.origin
-}
-
 async function forwardRequest(
   request: NextRequest,
   context: { params: Promise<{ path: string[] }> },
@@ -66,10 +62,18 @@ async function forwardRequest(
 
   const method = request.method.toUpperCase()
   if (UNSAFE_METHODS.has(method)) {
-    upstreamHeaders.set('origin', requestOrigin(request))
-    const csrfCookie = request.cookies.get('csrf_token')?.value?.trim()
-    const csrfFromClient = request.headers.get(CSRF_HEADER)?.trim()
-    const csrf = csrfCookie || csrfFromClient
+    // Forward the client's Origin VERBATIM (no fallback to a trusted origin):
+    // a real browser always sends it, and the backend allow-list rejects a
+    // foreign one. Falling back to the app's own origin when it's absent would
+    // let a cross-site request with no Origin borrow a trusted value and pass
+    // the backend check. And forward ONLY the client-supplied CSRF header —
+    // deriving it from the csrf_token cookie here would defeat the backend's
+    // double-submit check (the browser client now sends X-CSRF-Token itself).
+    const clientOrigin = request.headers.get('origin')?.trim()
+    if (clientOrigin) {
+      upstreamHeaders.set('origin', clientOrigin)
+    }
+    const csrf = request.headers.get(CSRF_HEADER)?.trim()
     if (csrf) {
       upstreamHeaders.set(CSRF_HEADER, csrf)
     }

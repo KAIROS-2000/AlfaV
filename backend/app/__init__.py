@@ -301,10 +301,12 @@ def _register_request_metrics(app: Flask) -> None:
         query_count = getattr(g, "_db_query_count", 0)
         response.headers.setdefault("X-Request-Duration-Ms", str(duration_ms))
         response.headers.setdefault("X-DB-Query-Count", str(query_count))
+        # Strip CR/LF so a crafted request path cannot forge extra log lines.
+        safe_path = (request.path or "").replace("\r", "\\r").replace("\n", "\\n")[:512]
         app.logger.info(
             "request_metrics method=%s path=%s status=%s duration_ms=%s query_count=%s",
             request.method,
-            request.path,
+            safe_path,
             response.status_code,
             duration_ms,
             query_count,

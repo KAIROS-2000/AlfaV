@@ -5,8 +5,9 @@
 # See docs/operations/image-pinning.md and scripts/pin-images.sh.
 # ---------------------------------------------------------------------------
 
-FROM python:3.12-slim
-# pin: python:3.12-slim  (replace with @sha256:<digest> before prod build)
+FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e
+# Digest-pinned (SEC-019); tag kept for readability. Must match judge_runner/Dockerfile.
+# Refresh with scripts/pin-images.sh.
 
 WORKDIR /app
 

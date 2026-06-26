@@ -1,0 +1,44 @@
+# Root .dockerignore — applies to build contexts rooted at the repo root,
+# i.e. the `backend` and `judge_runner` images (docker-compose `context: .`).
+# Without this file those builds ship .env, secrets/, .git and the audit logs
+# into the build context (and `COPY backend /app/backend` bakes the logs into
+# the image). The frontend build uses `context: ./frontend` and is governed by
+# frontend/.dockerignore instead.
+
+# --- Secrets / local env (must never enter a build context) ---
+.env
+.env.*
+!.env.example
+secrets/
+backend/.env
+backend/.env.*
+
+# --- VCS / tooling metadata ---
+.git
+.gitignore
+.github
+.claude
+.cursor
+
+# --- Audit/activity log exports (real PII: IPs, emails, child activity) ---
+backend/logs/
+
+# --- Python caches / virtualenvs ---
+**/__pycache__/
+**/*.py[cod]
+**/*.pyo
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.venv/
+**/venv/
+
+# --- Not needed by the backend/judge images (smaller, cleaner context) ---
+frontend/
+media/
+docs/
+*.md
+*.tsbuildinfo
+
+# --- Tests are not needed in the runtime image ---
+backend/tests/
