@@ -18,6 +18,7 @@ source alone).
 | SEC-014 | Low | Validation | `external_url` on useful tasks is validated server-side (http/https only, length cap) and guarded again at render (`safeHttpUrl`). Blocks `javascript:`/`data:` link injection. |
 | SEC-015 | Low | Docker | Backend port bound to `127.0.0.1` only (not published on all interfaces). |
 | SEC-016 | Low | Docker | `backend` and `frontend` services get `no-new-privileges:true` + `cap_drop: [ALL]` (previously only the judge-runner was hardened). |
+| SEC-019 | Low | Docker | All base images digest-pinned to their current multi-arch manifest (`python:3.12-slim`, `node:22-alpine`, `postgres:17`, `redis:7-alpine`) across the three Dockerfiles, `docker-compose.yml`, and CI services. Reproducible/tamper-evident builds; refresh via `scripts/pin-images.sh`. Validated with `docker compose config` + a backend/judge build. |
 | SEC-020 | Low | Deps | Pinned `redis==5.2.1`, `fakeredis==2.36.2`; removed the drifted `frontend/bun.lock` (CI uses npm). Pinned `next`/`react`/`react-dom` to exact versions and added `overrides` forcing `dompurify@^3.4.11` + `postcss@^8.5.15` — frontend tree now has **0 npm audit findings**. |
 | SEC-008 / SEC-009 | Medium | Sandbox | Per-execution seccomp BPF filter in the judge-runner `preexec_fn` denies `connect(2)` for the forked user-code child only (`SECCOMP_RET_ERRNO`/EPERM, never KILL; x86_64; best-effort/fail-open). Closes the lateral-movement path to `backend:8000` over `judge_net` (by IP → EPERM; by hostname → DNS also fails) and neuters the `/proc` token-leak (code can no longer connect out to use it). Runner process + healthcheck unaffected. **Confirmed both the vuln and the fix against a running stack.** |
 | SEC-022 | Info | Logging | CR/LF stripped from the request path in the metrics log to prevent log forging. |
@@ -26,8 +27,7 @@ source alone).
 
 | ID | Severity | Action |
 |----|----------|--------|
-| SEC-002 | **Critical** | Rotate the secrets present in the on-disk `.env`: `SECRET_KEY`, `UNISENDER_GO_API_KEY`, `JUDGE_RUNNER_AUTH_TOKEN`, `SUPERADMIN_PASSWORD` (and confirm the historical GigaChat key rotation, S-19). `.env` is gitignored; the leak vector is the file shipped on disk. |
-| SEC-019 | Low | Digest-pin all base images via `scripts/pin-images.sh` for production builds. |
+| SEC-002 | **Critical** | Rotate the secrets present in the on-disk `.env`: `SECRET_KEY`, `UNISENDER_GO_API_KEY`, `JUDGE_RUNNER_AUTH_TOKEN`, `SUPERADMIN_PASSWORD` (and confirm the historical GigaChat key rotation, S-19). `.env` is gitignored; the leak vector is the file shipped on disk. **This is the only remaining must-do item.** |
 
 ## Deferred (documented, lower priority)
 
