@@ -19,6 +19,7 @@ source alone).
 | SEC-015 | Low | Docker | Backend port bound to `127.0.0.1` only (not published on all interfaces). |
 | SEC-016 | Low | Docker | `backend` and `frontend` services get `no-new-privileges:true` + `cap_drop: [ALL]` (previously only the judge-runner was hardened). |
 | SEC-020 | Low | Deps | Pinned `redis==5.2.1`, `fakeredis==2.36.2`; removed the drifted `frontend/bun.lock` (CI uses npm). Pinned `next`/`react`/`react-dom` to exact versions and added `overrides` forcing `dompurify@^3.4.11` + `postcss@^8.5.15` — frontend tree now has **0 npm audit findings**. |
+| SEC-008 / SEC-009 | Medium | Sandbox | Per-execution seccomp BPF filter in the judge-runner `preexec_fn` denies `connect(2)` for the forked user-code child only (`SECCOMP_RET_ERRNO`/EPERM, never KILL; x86_64; best-effort/fail-open). Closes the lateral-movement path to `backend:8000` over `judge_net` (by IP → EPERM; by hostname → DNS also fails) and neuters the `/proc` token-leak (code can no longer connect out to use it). Runner process + healthcheck unaffected. **Confirmed both the vuln and the fix against a running stack.** |
 | SEC-022 | Info | Logging | CR/LF stripped from the request path in the metrics log to prevent log forging. |
 
 ## Still requires operator action (NOT fixable in code here)
@@ -26,13 +27,13 @@ source alone).
 | ID | Severity | Action |
 |----|----------|--------|
 | SEC-002 | **Critical** | Rotate the secrets present in the on-disk `.env`: `SECRET_KEY`, `UNISENDER_GO_API_KEY`, `JUDGE_RUNNER_AUTH_TOKEN`, `SUPERADMIN_PASSWORD` (and confirm the historical GigaChat key rotation, S-19). `.env` is gitignored; the leak vector is the file shipped on disk. |
-| SEC-008 / SEC-009 | Medium | Sandbox lateral movement: separate the judge-runner from the backend network (one-way job queue or iptables `backend→runner:8090` only) and move seccomp to a whitelist that denies `socket`/`connect`. These need validation inside a real judge container (`test_code_judge_security` + integration), so they were not patched blind. |
 | SEC-019 | Low | Digest-pin all base images via `scripts/pin-images.sh` for production builds. |
 
 ## Deferred (documented, lower priority)
 
 - **SEC-010** (CSP `style-src 'unsafe-inline'`): left as-is — Monaco editor injects `<style>` blocks at runtime, so tightening this risks breaking the code editor. Needs frontend testing.
 - **SEC-013** (no refresh-token rotation): current non-rotating design with a revocation list is acceptable; rotation + reuse-detection is a follow-up enhancement.
+- **SEC-008/009 (residual hardening)**: the exploitable lateral-movement path is closed (see above). A container-level seccomp *whitelist* (vs. the current allow-by-default denylist) and a one-way job queue / `backend→runner:8090`-only network policy remain recommended defence-in-depth, but are no longer required to close the finding.
 
 ## Verification
 
