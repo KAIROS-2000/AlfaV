@@ -12,7 +12,7 @@ from ..services.assignment_images import ImageValidationError, MAX_UPLOAD_BYTES,
 
 support_bp = Blueprint("support", __name__)
 
-_TICKET_CREATORS = [UserRole.STUDENT, UserRole.TEACHER, UserRole.PARENT]
+_TICKET_CREATORS = [UserRole.STUDENT, UserRole.TEACHER, UserRole.PARENT, UserRole.MANAGER]
 _BUG_HUNTER_REPORTERS = [
     UserRole.STUDENT,
     UserRole.TEACHER,

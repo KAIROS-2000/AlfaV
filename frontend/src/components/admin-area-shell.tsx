@@ -1,7 +1,7 @@
 import Link from 'next/link'
 import type { ReactNode } from 'react'
 
-type AdminArea = 'admin' | 'superadmin'
+type AdminArea = 'admin' | 'superadmin' | 'manager'
 type AdminSection =
   | 'telemetry'
   | 'users'
@@ -11,6 +11,9 @@ type AdminSection =
   | 'bug-hunter'
   | 'teacher-requests'
   | 'admins'
+  | 'managers'
+  | 'contacts'
+  | 'broadcasts'
   | 'lessons'
   | 'modules'
   | 'logs'
@@ -149,6 +152,24 @@ const NAV_ITEMS: Record<AdminArea, NavItem[]> = {
       description: 'Создание и доступ',
     },
     {
+      key: 'managers',
+      href: '/superadmin/managers',
+      label: 'Менеджеры',
+      description: 'Создание и доступ',
+    },
+    {
+      key: 'contacts',
+      href: '/superadmin/contacts',
+      label: 'Контакты',
+      description: 'Пользователи и родители',
+    },
+    {
+      key: 'broadcasts',
+      href: '/superadmin/broadcasts',
+      label: 'Рассылки',
+      description: 'Фильтры и отправка',
+    },
+    {
       key: 'lessons',
       href: '/superadmin/lessons',
       label: 'Уроки',
@@ -177,6 +198,20 @@ const NAV_ITEMS: Record<AdminArea, NavItem[]> = {
       href: '/superadmin/logs',
       label: 'Логи',
       description: 'Журнал действий',
+    },
+  ],
+  manager: [
+    {
+      key: 'contacts',
+      href: '/manager/contacts',
+      label: 'Контакты',
+      description: 'Пользователи и родители',
+    },
+    {
+      key: 'broadcasts',
+      href: '/manager/broadcasts',
+      label: 'Рассылки',
+      description: 'Фильтры и отправка',
     },
   ],
 }
@@ -236,7 +271,11 @@ export function AdminAreaShell({
               <div>
                 <p className="brand-eyebrow">Навигация</p>
                 <h2 className="mt-3 text-2xl font-black text-slate-900">
-                  {area === 'superadmin' ? 'Суперадмин-модули' : 'Админ-модули'}
+                  {area === 'superadmin'
+                    ? 'Суперадмин-модули'
+                    : area === 'manager'
+                      ? 'Рабочая зона менеджера'
+                      : 'Админ-модули'}
                 </h2>
                 <p className="mt-3 text-sm leading-7 text-slate-500">
                   Каждая зона вынесена в отдельный экран, чтобы поиск, контент и аудит не смешивались в одном полотне.

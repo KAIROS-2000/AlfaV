@@ -10,19 +10,35 @@ enabling the profile on a new host.
 1. **Container filesystem is read-only** (`read_only: true`).
    Only `/tmp` is writable and mounted as a `tmpfs` with `noexec,nosuid` and
    a small size cap (128 MiB).
-2. **All Linux capabilities dropped** (`cap_drop: [ALL]`). The runner needs
-   none of them.
+2. **Minimal dispatcher capabilities.** Compose drops all capabilities, then
+   restores only `CHOWN`, `SETUID`, `SETGID`, `DAC_OVERRIDE`, and `KILL` for the
+   trusted dispatcher to prepare and remove per-worker workspaces. Submitted
+   workers run after `setuid` and do not retain those capabilities.
 3. **No new privileges** (`security_opt: no-new-privileges:true`). setuid
    binaries cannot elevate.
 4. **Custom seccomp profile** (`judge_runner/seccomp.json`, see below).
-5. **Process limit** (`pids_limit: 128`) caps fork-bombs at the cgroup level.
-6. **Resource limits**:
+5. **Per-submission identity and workspace.** The trusted HTTP dispatcher
+   allocates a never-reused numeric UID for each submission, creates its
+   `/tmp/judge-*` tree with mode `0700`, and drops the Python/Node worker to
+   that UID before `exec`. Concurrent workers therefore cannot read or modify
+   another submission's workspace even though they share a container. The
+   dispatcher is UID 0 solely for this setup/cleanup operation and retains only
+   `CHOWN`, `SETUID`, `SETGID`, `DAC_OVERRIDE`, and `KILL`; submitted workers lose those
+   capabilities after `setuid`.
+6. **Bounded output and process cleanup.** Stdout and stderr are consumed as
+   streams into bounded buffers rather than accumulated with `communicate()`.
+   The runner starts each execution in its own POSIX process group and kills
+   that group on timeout, output overflow, or leader exit. Cleanup then
+   SIGKILLs any remaining process with that submission's unique worker UID,
+   which also catches descendants that deliberately detached with `setsid`.
+7. **Process limit** (`pids_limit: 128`) caps fork-bombs at the cgroup level.
+8. **Resource limits**:
    - `mem_limit: 512m`, `memswap_limit: 512m` → no swap escape from the
      memory cap.
    - `cpus: 1.0` → a single logical core per container.
    - `ulimits.nproc: 64`, `ulimits.nofile: 256/256` → per-process rlimits as
      a second line of defence behind `pids_limit`.
-7. **Network isolation (partial — see known limitation)**. The `judge_net`
+9. **Network isolation (partial — see known limitation)**. The `judge_net`
    bridge is declared with `internal: true`, which disables the default
    gateway — so the judge-runner has **no Internet egress**. The judge-runner
    is attached ONLY to `judge_net`; it has no route to `backend_net` and no
@@ -41,19 +57,23 @@ enabling the profile on a new host.
      endpoints, and those are rate-limitable.
    - CSRF double-submit (P0-3) blocks unsafe operations from clients that
      cannot read the user's `csrf_token` cookie — which the runner cannot.
-   - The runner's bearer token (`CODE_JUDGE_RUNNER_TOKEN`) is produced and
-     consumed only by the backend; the runner never needs to use it outbound,
-     so it is not stored in a way the sandboxed subprocess can read.
+   - Before binding the HTTP socket, the runner self-execs with a sanitized
+     environment. It passes the inbound bearer token once through an inherited
+     pipe, consumes and closes that descriptor, and gives worker processes a
+     strict allowlist environment with `close_fds=True`. The token is therefore
+     absent from `/proc/1/environ`, worker argv/environment, and inherited file
+     descriptors. Seccomp also blocks ptrace and cross-process VM reads.
 
    **Planned upgrade.** A future hardening pass should either (a) replace the
    direct HTTP call with a pull-based job queue (Redis/RabbitMQ with ACLs so
    the runner can only consume from the queue), or (b) install host-level
    iptables rules to drop `judge-runner → backend:8000` traffic. Tracked as
    a follow-up under Phase 1.5 continuation.
-8. **Non-root user** (`USER 1001` in the Dockerfile; UID/GID 1001 =
-   `judgeuser`). Combined with `no-new-privileges` this makes privilege
-   escalation within the container materially harder.
-9. **No published ports**. The service exposes 8090 only on the internal
+10. **Unprivileged submitted code.** Every submitted Python/Node process runs
+   as its fresh numeric worker UID, not as the root dispatcher. Combined with
+   `no-new-privileges` and the capability drop after `setuid`, this makes
+   privilege escalation within the container materially harder.
+11. **No published ports**. The service exposes 8090 only on the internal
    `judge_net`.
 
 ## Seccomp profile
@@ -122,16 +142,18 @@ Run these from the host after `docker compose up -d judge-runner`:
    docker inspect --format='{{.HostConfig.SecurityOpt}}' proghub-judge-runner
    ```
    Must include `seccomp=...seccomp.json`.
-2. **Capabilities are empty:**
+2. **Capability budget:**
    ```
    docker inspect --format='{{.HostConfig.CapDrop}} / {{.HostConfig.CapAdd}}' proghub-judge-runner
    ```
-   Expected: `[ALL] / []`.
-3. **Running as UID 1001:**
+   Expected: `[ALL] / [CHOWN SETUID SETGID DAC_OVERRIDE KILL]`; these are used
+   only by the trusted dispatcher before workers drop to their per-request UID.
+3. **Dispatcher capabilities and worker UID:**
    ```
-   docker exec proghub-judge-runner id
+   docker inspect --format='{{.HostConfig.CapDrop}} / {{.HostConfig.CapAdd}}' proghub-judge-runner
    ```
-   Expected: `uid=1001(judgeuser) gid=1001(judgeuser) groups=1001(judgeuser)`.
+   Expected: `[ALL] / [CHOWN SETUID SETGID DAC_OVERRIDE KILL]`. Submitted programs
+   must report a non-zero, per-request UID and no effective capabilities.
 4. **Read-only rootfs:**
    ```
    docker exec proghub-judge-runner sh -c 'touch /abc 2>&1 || echo OK'

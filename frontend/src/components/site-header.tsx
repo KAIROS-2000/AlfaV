@@ -19,14 +19,14 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 
-type UserRole = 'student' | 'teacher' | 'parent' | 'admin' | 'superadmin'
+type UserRole = 'student' | 'teacher' | 'parent' | 'manager' | 'admin' | 'superadmin'
 type HeaderZone = 'teacher' | 'public' | 'app' | 'parent' | 'admin'
 
-const roleSet = new Set<UserRole>(['student', 'teacher', 'parent', 'admin', 'superadmin'])
+const roleSet = new Set<UserRole>(['student', 'teacher', 'parent', 'manager', 'admin', 'superadmin'])
 
 function resolveHeaderZone(pathname: string | null): HeaderZone {
 	if (pathname?.startsWith('/teacher')) return 'teacher'
-	if (pathname?.startsWith('/admin') || pathname?.startsWith('/superadmin'))
+	if (pathname?.startsWith('/admin') || pathname?.startsWith('/superadmin') || pathname?.startsWith('/manager'))
 		return 'admin'
 	if (pathname?.startsWith('/parent/') || pathname === '/parent') return 'parent'
 	if (pathname === '/' || pathname === '/tournament' || pathname === '/it-career')
@@ -297,6 +297,18 @@ export function SiteHeader() {
 				{ href: '/superadmin/logs', label: 'Логи' },
 				{ href: '/roadmap', label: 'Уроки' },
 				{ href: '/useful', label: 'Полезное' },
+				{ href: '/tournament', label: 'Турнир' },
+				{ href: '/profile', label: 'Профиль' },
+			]
+		} else if (role === 'manager') {
+			return [
+				{ href: '/manager/contacts', label: 'Менеджер' },
+				{ href: '/manager/broadcasts', label: 'Рассылки' },
+				{ href: '/dashboard', label: 'Кабинет' },
+				{ href: '/messages', label: 'Сообщения' },
+				{ href: '/roadmap', label: 'Уроки' },
+				{ href: '/useful', label: 'Полезное' },
+				{ href: '/leaderboard', label: 'Рейтинг' },
 				{ href: '/tournament', label: 'Турнир' },
 				{ href: '/profile', label: 'Профиль' },
 			]

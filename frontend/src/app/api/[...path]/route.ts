@@ -36,10 +36,6 @@ function responseCookieHeaders(response: Response) {
   return fallback ? [fallback] : []
 }
 
-function requestOrigin(request: NextRequest) {
-  return request.headers.get('origin')?.trim() || request.nextUrl.origin
-}
-
 async function forwardRequest(
   request: NextRequest,
   context: { params: Promise<{ path: string[] }> },
@@ -50,6 +46,7 @@ async function forwardRequest(
   const contentType = request.headers.get('content-type')
   const accept = request.headers.get('accept')
   const authorization = request.headers.get('authorization')
+  const origin = request.headers.get('origin')?.trim()
 
   if (cookieHeader) {
     upstreamHeaders.set('cookie', cookieHeader)
@@ -66,12 +63,12 @@ async function forwardRequest(
 
   const method = request.method.toUpperCase()
   if (UNSAFE_METHODS.has(method)) {
-    upstreamHeaders.set('origin', requestOrigin(request))
-    const csrfCookie = request.cookies.get('csrf_token')?.value?.trim()
     const csrfFromClient = request.headers.get(CSRF_HEADER)?.trim()
-    const csrf = csrfCookie || csrfFromClient
-    if (csrf) {
-      upstreamHeaders.set(CSRF_HEADER, csrf)
+    if (origin) {
+      upstreamHeaders.set('origin', origin)
+    }
+    if (csrfFromClient) {
+      upstreamHeaders.set(CSRF_HEADER, csrfFromClient)
     }
   }
 

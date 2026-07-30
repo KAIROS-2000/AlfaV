@@ -117,11 +117,13 @@ services:
     # P0-4: judge-runner sandbox hardening. Full rationale + verification
     # checklist lives in docs/operations/sandbox.md. Summary:
     #   - read-only rootfs, tmpfs on /tmp with noexec,nosuid
-    #   - all Linux capabilities dropped, no-new-privileges
+    #   - all Linux capabilities dropped except five dispatcher-only file/UID
+    #     transition capabilities; no-new-privileges remains enabled
     #   - custom seccomp profile (curated denylist; see seccomp.json)
     #   - mem/cpu/pids/ulimit caps to contain resource-abuse
     #   - attached only to `judge_net` (internal: true below) -> no egress
-    #   - non-root USER 1001 baked into the Dockerfile
+    #   - root dispatcher with only the five caps required to create, chown,
+    #     kill/clean and drop each worker into a fresh unprivileged numeric UID
     # -----------------------------------------------------------------------
     read_only: true
     tmpfs:
@@ -140,6 +142,12 @@ services:
       # - apparmor=docker-default
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - KILL
     pids_limit: 128
     mem_limit: 512m
     memswap_limit: 512m

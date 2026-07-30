@@ -32,10 +32,11 @@ RUN set -eux; \
     fi; \
     rm -rf /var/lib/apt/lists/*
 
-# Create a dedicated non-root user with an explicit UID/GID so that
-# docker-compose security policies (read_only, user namespaces) can refer to
-# it deterministically. 1001 intentionally sits outside the default Debian
-# "users" range and avoids collision with the host's primary user (1000).
+# The HTTP dispatcher starts as root only to create a new numeric UID-owned
+# workspace for every submission, then its child drops to that UID before
+# executing untrusted code. docker-compose drops every capability by default
+# and adds back only CHOWN/SETUID/SETGID/DAC_OVERRIDE/KILL for this dispatcher
+# work and final per-UID worker cleanup.
 RUN groupadd --system --gid 1001 judgeuser \
     && useradd --system --uid 1001 --gid 1001 \
         --home-dir /home/judgeuser --create-home \
@@ -44,14 +45,10 @@ RUN groupadd --system --gid 1001 judgeuser \
 COPY judge_runner /app/judge_runner
 COPY shared /app/shared
 
-RUN chown -R judgeuser:judgeuser /app
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     JUDGE_RUNNER_HOST=0.0.0.0 \
     JUDGE_RUNNER_PORT=8090
-
-USER 1001
 
 CMD ["python", "judge_runner/app.py"]

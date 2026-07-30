@@ -39,6 +39,7 @@ REGISTER_THROTTLE_SCOPE = 'register'
 REGISTER_IP_THROTTLE_SCOPE = 'register_ip'
 REFRESH_THROTTLE_SCOPE = 'refresh'
 CLASS_JOIN_THROTTLE_SCOPE = 'class_join'
+STAFF_BROADCAST_THROTTLE_SCOPE = 'staff_broadcast'
 PASSWORD_RESET_THROTTLE_SCOPE = 'password_reset'
 RESEND_VERIFICATION_THROTTLE_SCOPE = 'resend_verification'
 SESSION_VERSION_CACHE_TTL_SECONDS = 30
@@ -181,6 +182,12 @@ def _throttle_settings(scope: str) -> tuple[int, int, int]:
             int(current_app.config.get('CLASS_JOIN_RATE_LIMIT_WINDOW_SECONDS', 600)),
             int(current_app.config.get('CLASS_JOIN_RATE_LIMIT_MAX_FAILURES', 12)),
             int(current_app.config.get('CLASS_JOIN_RATE_LIMIT_BLOCK_SECONDS', 600)),
+        )
+    if scope == STAFF_BROADCAST_THROTTLE_SCOPE:
+        return (
+            int(current_app.config.get('STAFF_BROADCAST_RATE_LIMIT_WINDOW_SECONDS', 3600)),
+            int(current_app.config.get('STAFF_BROADCAST_RATE_LIMIT_MAX_REQUESTS', 3)),
+            int(current_app.config.get('STAFF_BROADCAST_RATE_LIMIT_BLOCK_SECONDS', 3600)),
         )
     if scope == PASSWORD_RESET_THROTTLE_SCOPE:
         return (
@@ -420,6 +427,22 @@ def register_class_join_failure(user_id: int, ip_address: str | None = None) -> 
 def clear_class_join_failures(user_id: int, ip_address: str | None = None) -> None:
     clear_throttle_failures(
         CLASS_JOIN_THROTTLE_SCOPE, f'class_join:{int(user_id)}', ip_address
+    )
+
+
+def staff_broadcast_attempt_allowed(user_id: int) -> bool:
+    return throttle_allowed(
+        STAFF_BROADCAST_THROTTLE_SCOPE,
+        f'staff_broadcast:{int(user_id)}',
+        ip_address='staff_broadcast',
+    )
+
+
+def register_staff_broadcast_attempt(user_id: int) -> bool:
+    return register_throttle_failure(
+        STAFF_BROADCAST_THROTTLE_SCOPE,
+        f'staff_broadcast:{int(user_id)}',
+        ip_address='staff_broadcast',
     )
 
 

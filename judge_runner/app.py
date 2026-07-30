@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import hmac
 import math
 import os
+import secrets
 import shutil
+import signal
 import sys
 import threading
 import time
@@ -31,10 +34,14 @@ MAX_CONCURRENCY = max(1, int(os.getenv('JUDGE_RUNNER_MAX_CONCURRENCY', '4')))
 MAX_TEST_CONCURRENCY = max(1, int(os.getenv('JUDGE_RUNNER_MAX_TEST_CONCURRENCY', str(MAX_CONCURRENCY))))
 PYTHON_BIN = os.getenv('JUDGE_RUNNER_PYTHON_BIN', 'python')
 NODE_BIN = os.getenv('JUDGE_RUNNER_NODE_BIN', 'node')
-AUTH_TOKEN = (os.getenv('JUDGE_RUNNER_AUTH_TOKEN') or '').strip()
 ALLOW_UNAUTHENTICATED = (os.getenv('JUDGE_RUNNER_ALLOW_UNAUTHENTICATED') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
 SUPPORTED_LANGUAGES = {'python', 'javascript'}
 RUNNER_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENCY)
+_AUTH_TOKEN_FD_ENV = 'JUDGE_RUNNER_AUTH_TOKEN_FD'
+_EXECUTION_UID_MIN = 100_000
+_EXECUTION_UID_MAX = 2_000_000_000
+_execution_uid_lock = threading.Lock()
+_next_execution_uid = _EXECUTION_UID_MIN + secrets.randbelow(1_000_000)
 
 
 def _safe_int(value, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
@@ -54,6 +61,85 @@ def _bearer_token(value: str | None) -> str:
     if not header.lower().startswith('bearer '):
         return ''
     return header[7:].strip()
+
+
+def _consume_runner_auth_token() -> str:
+    """Read the one-shot bootstrap pipe without leaving a secret in argv/env."""
+
+    inherited_fd = os.environ.pop(_AUTH_TOKEN_FD_ENV, '').strip()
+    if inherited_fd:
+        try:
+            fd = int(inherited_fd)
+        except ValueError:
+            return ''
+        try:
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b''.join(chunks).decode('utf-8', errors='strict').strip()
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+    # Imports in unit tests do not go through the exec bootstrap. The actual
+    # service always consumes the inherited FD path below before accepting work.
+    return (os.getenv('JUDGE_RUNNER_AUTH_TOKEN') or '').strip()
+
+
+def _bootstrap_auth_token_for_exec() -> None:
+    """Self-exec with a sanitized environment before opening the HTTP socket.
+
+    Removing a variable with unsetenv is insufficient for `/proc/<pid>/environ`:
+    the original process environment storage can remain readable. A one-shot
+    inherited pipe lets the post-exec runner keep the token only in private
+    process memory; submitted programs use a clean exec environment and inherit
+    neither the secret nor the pipe descriptor.
+    """
+
+    if os.environ.get(_AUTH_TOKEN_FD_ENV):
+        return
+    token = (os.getenv('JUDGE_RUNNER_AUTH_TOKEN') or '').strip()
+    if not token:
+        return
+
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, token.encode('utf-8'))
+    finally:
+        os.close(write_fd)
+    os.set_inheritable(read_fd, True)
+    sanitized_env = dict(os.environ)
+    sanitized_env.pop('JUDGE_RUNNER_AUTH_TOKEN', None)
+    sanitized_env[_AUTH_TOKEN_FD_ENV] = str(read_fd)
+    try:
+        os.execve(sys.executable, [sys.executable, str(Path(__file__).resolve())], sanitized_env)
+    finally:
+        # os.execve never returns on success. This closes the descriptor only
+        # when startup fails before the replacement process begins.
+        with contextlib.suppress(OSError):
+            os.close(read_fd)
+
+
+if __name__ == '__main__':
+    _bootstrap_auth_token_for_exec()
+
+
+AUTH_TOKEN = _consume_runner_auth_token()
+
+
+def _allocate_execution_uid() -> int:
+    """Never reuse a worker UID during this runner process lifetime."""
+
+    global _next_execution_uid
+    with _execution_uid_lock:
+        if _next_execution_uid > _EXECUTION_UID_MAX:
+            raise RuntimeError('Диапазон изолированных UID judge-runner исчерпан.')
+        uid = _next_execution_uid
+        _next_execution_uid += 1
+        return uid
 
 
 def request_authorized(headers) -> bool:
@@ -122,8 +208,67 @@ class RunnerRuntime:
     def build_env(self) -> dict[str, str]:
         return _build_env()
 
-    def preexec_fn(self, memory_limit_mb: int, time_limit_ms: int, language: str) -> Callable[[], None] | None:
-        return _preexec_resource_limits(memory_limit_mb, time_limit_ms, language)
+    def preexec_fn(
+        self,
+        memory_limit_mb: int,
+        time_limit_ms: int,
+        language: str,
+        execution_uid: int | None = None,
+    ) -> Callable[[], None] | None:
+        resource_limits = _preexec_resource_limits(memory_limit_mb, time_limit_ms, language)
+        if execution_uid is None:
+            return resource_limits
+
+        def drop_to_execution_uid() -> None:
+            if os.name != 'posix' or os.geteuid() != 0:
+                raise RuntimeError('Изолированный runner должен запускать worker-процессы из привилегированного dispatcher.')
+            if resource_limits is not None:
+                resource_limits()
+            os.setgroups([])
+            os.setgid(execution_uid)
+            os.setuid(execution_uid)
+            os.umask(0o077)
+
+        return drop_to_execution_uid
+
+    def prepare_workspace(self, workdir: str, execution_uid: int) -> None:
+        if os.name != 'posix' or os.geteuid() != 0:
+            raise RuntimeError('Изолированный runner требует POSIX dispatcher с UID 0.')
+        paths: list[tuple[str, list[str], list[str]]] = list(os.walk(workdir, topdown=False))
+        for root, _, files in paths:
+            for filename in files:
+                path = os.path.join(root, filename)
+                os.chown(path, execution_uid, execution_uid)
+                os.chmod(path, 0o600)
+            os.chown(root, execution_uid, execution_uid)
+            os.chmod(root, 0o700)
+
+    def cleanup_workspace(self, workdir: str, execution_uid: int) -> None:  # noqa: ARG002
+        # A hostile child can call setsid and leave the direct process group.
+        # The per-request UID makes a final `/proc` sweep precise: it cannot
+        # affect the dispatcher or any other submission, and closes that escape
+        # hatch before the workspace is removed.
+        for _ in range(3):
+            worker_pids: list[int] = []
+            for entry in os.scandir('/proc'):
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    if entry.stat(follow_symlinks=False).st_uid == execution_uid:
+                        worker_pids.append(int(entry.name))
+                except FileNotFoundError:
+                    continue
+            if not worker_pids:
+                break
+            for pid in worker_pids:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGKILL)
+            time.sleep(0.02)
+
+        # The dispatcher retains only the capabilities required to kill stale
+        # workers and remove arbitrary files a worker wrote, without falling
+        # back to a shared UID or leaving secrets behind on the tmpfs.
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 async def execute_submission_payload_async(payload: dict) -> dict:
@@ -151,6 +296,7 @@ async def execute_submission_payload_async(payload: dict) -> dict:
         max_output_chars=_safe_int(payload.get('max_output_chars'), MAX_OUTPUT_CHARS, minimum=256, maximum=20000),
         tempdir_prefix='judge-',
         max_parallel_tests=MAX_TEST_CONCURRENCY,
+        execution_uid=_allocate_execution_uid(),
     )
     return await async_execute_stdio_submission(request, RunnerRuntime())
 

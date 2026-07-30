@@ -315,6 +315,348 @@ class RoleRestrictedSubmissionTests(P0FixesBase):
 
 
 # =====================================================================================
+# Curriculum access and private judge-output regressions
+# =====================================================================================
+
+
+class CurriculumAccessControlTests(P0FixesBase):
+    def _create_visibility_fixture(self, app, *, teacher_id: int, member_id: int):
+        from app.core.db import db
+        from app.models.learning import (
+            ClassMembership,
+            Classroom,
+            Lesson,
+            Module,
+            build_custom_classroom_module_slug,
+        )
+
+        with app.app_context():
+            public_module = Module(
+                slug='visibility-public',
+                title='Public module',
+                description='Published module with a draft sibling.',
+                age_group='middle',
+                icon='code',
+                color='#4A90D9',
+                order_index=1,
+                is_published=True,
+            )
+            private_module = Module(
+                slug='visibility-private',
+                title='Private module',
+                description='Unpublished global module.',
+                age_group='middle',
+                icon='code',
+                color='#4A90D9',
+                order_index=2,
+                is_published=False,
+            )
+            classroom = Classroom(
+                name='Visibility class',
+                description='Authorization fixture',
+                code='VIS001',
+                teacher_id=teacher_id,
+            )
+            db.session.add_all([public_module, private_module, classroom])
+            db.session.flush()
+            custom_module = Module(
+                slug=build_custom_classroom_module_slug(classroom.id, 'middle'),
+                title='Class-only module',
+                description='Only classroom members may open this module.',
+                age_group='middle',
+                icon='book-open',
+                color='#0EA5E9',
+                order_index=3,
+                # A mistaken publish flag must never make class content public.
+                is_published=True,
+            )
+            db.session.add(custom_module)
+            db.session.flush()
+            public_lesson = Lesson(
+                module_id=public_module.id,
+                slug='visibility-public-lesson',
+                title='Public lesson',
+                summary='Visible',
+                order_index=1,
+                passing_score=70,
+                theory_blocks=[],
+                interactive_steps=[],
+                is_published=True,
+            )
+            draft_lesson = Lesson(
+                module_id=public_module.id,
+                slug='visibility-draft-lesson',
+                title='Draft lesson',
+                summary='Must not leak',
+                order_index=2,
+                passing_score=70,
+                theory_blocks=[],
+                interactive_steps=[],
+                is_published=False,
+            )
+            private_lesson = Lesson(
+                module_id=private_module.id,
+                slug='visibility-private-lesson',
+                title='Private lesson',
+                summary='Must not leak',
+                order_index=1,
+                passing_score=70,
+                theory_blocks=[],
+                interactive_steps=[],
+                is_published=False,
+            )
+            custom_lesson = Lesson(
+                module_id=custom_module.id,
+                slug='visibility-class-lesson',
+                title='Class lesson',
+                summary='Visible to its class only',
+                order_index=1,
+                passing_score=70,
+                theory_blocks=[],
+                interactive_steps=[],
+                is_published=False,
+            )
+            db.session.add_all(
+                [public_lesson, draft_lesson, private_lesson, custom_lesson]
+            )
+            db.session.add(
+                ClassMembership(classroom_id=classroom.id, student_id=member_id)
+            )
+            db.session.commit()
+            return {
+                'public_module_id': public_module.id,
+                'public_lesson_id': public_lesson.id,
+                'draft_lesson_id': draft_lesson.id,
+                'private_lesson_id': private_lesson.id,
+                'custom_module_id': custom_module.id,
+                'custom_lesson_id': custom_lesson.id,
+            }
+
+    def test_curriculum_access_is_explicit_for_drafts_classes_and_managers(self):
+        app = self.create_app()
+        from app.models.user import UserRole
+
+        teacher_id = self.create_user(
+            app, role=UserRole.TEACHER, email='visibility-teacher@example.com'
+        )
+        member_id = self.create_student(app, email='visibility-member@example.com')
+        self.create_student(app, email='visibility-outsider@example.com')
+        self.create_user(app, role=UserRole.PARENT, email='visibility-parent@example.com')
+        self.create_user(app, role=UserRole.MANAGER, email='visibility-manager@example.com')
+        self.create_user(app, role=UserRole.ADMIN, email='visibility-admin@example.com')
+        ids = self._create_visibility_fixture(
+            app, teacher_id=teacher_id, member_id=member_id
+        )
+
+        with app.test_client() as public_client:
+            bootstrap = public_client.get('/api/bootstrap')
+        self.assertEqual(bootstrap.status_code, 200)
+        self.assertNotIn(
+            ids['custom_module_id'],
+            [module['id'] for module in bootstrap.get_json()['featured_modules']],
+        )
+        public_module = next(
+            module
+            for module in bootstrap.get_json()['featured_modules']
+            if module['id'] == ids['public_module_id']
+        )
+        self.assertEqual(
+            [lesson['id'] for lesson in public_module['lessons']],
+            [ids['public_lesson_id']],
+        )
+
+        with app.test_client() as manager_client:
+            self.login(manager_client, email='visibility-manager@example.com')
+            catalog = manager_client.get('/api/modules?age_group=middle')
+            self.assertEqual(catalog.status_code, 200)
+            self.assertNotIn(
+                ids['public_module_id'],
+                [module['id'] for module in catalog.get_json()['modules']],
+            )
+            self.assertEqual(
+                manager_client.get(
+                    f"/api/lessons/{ids['public_lesson_id']}"
+                ).status_code,
+                403,
+            )
+            self.assertEqual(
+                manager_client.get(
+                    f"/api/modules/{ids['custom_module_id']}/lessons"
+                ).status_code,
+                403,
+            )
+            self.assertEqual(
+                manager_client.post(
+                    f"/api/lessons/{ids['public_lesson_id']}/start"
+                ).status_code,
+                403,
+            )
+
+        with app.test_client() as parent_client:
+            self.login(parent_client, email='visibility-parent@example.com')
+            self.assertEqual(
+                parent_client.get(
+                    f"/api/lessons/{ids['private_lesson_id']}"
+                ).status_code,
+                403,
+            )
+
+        with app.test_client() as outsider_client:
+            self.login(outsider_client, email='visibility-outsider@example.com')
+            self.assertEqual(
+                outsider_client.get(
+                    f"/api/lessons/{ids['custom_lesson_id']}"
+                ).status_code,
+                403,
+            )
+
+        with app.test_client() as member_client:
+            self.login(member_client, email='visibility-member@example.com')
+            member_lesson = member_client.get(
+                f"/api/lessons/{ids['public_lesson_id']}"
+            )
+            self.assertEqual(member_lesson.status_code, 200)
+            self.assertEqual(
+                [
+                    lesson['id']
+                    for lesson in member_lesson.get_json()['lesson']['module']['lessons']
+                ],
+                [ids['public_lesson_id']],
+            )
+            self.assertEqual(
+                member_client.get(
+                    f"/api/lessons/{ids['custom_lesson_id']}"
+                ).status_code,
+                200,
+            )
+
+        with app.test_client() as teacher_client:
+            self.login(teacher_client, email='visibility-teacher@example.com')
+            self.assertEqual(
+                teacher_client.get(
+                    f"/api/lessons/{ids['custom_lesson_id']}"
+                ).status_code,
+                200,
+            )
+
+        with app.test_client() as admin_client:
+            self.login(admin_client, email='visibility-admin@example.com')
+            self.assertEqual(
+                admin_client.get(
+                    f"/api/lessons/{ids['private_lesson_id']}"
+                ).status_code,
+                200,
+            )
+
+
+class JudgeResultPrivacyTests(P0FixesBase):
+    def _create_code_task(self, app) -> int:
+        from app.core.db import db
+        from app.models.learning import Task
+
+        ids = self._make_module_with_lesson(app, slug_suffix='judge-private')
+        with app.app_context():
+            task = Task(
+                lesson_id=ids['lesson_id'],
+                task_type='code',
+                title='Private judge task',
+                prompt='Print the supplied input.',
+                starter_code='print(input())',
+                validation={
+                    'evaluation_mode': 'stdin_stdout',
+                    'language': 'python',
+                    'tests': [
+                        {
+                            'label': 'private case',
+                            'input': 'PRIVATE_TEST_INPUT',
+                            'expected': 'PRIVATE_TEST_EXPECTED',
+                        }
+                    ],
+                },
+                hints=[],
+                xp_reward=10,
+            )
+            db.session.add(task)
+            db.session.commit()
+            return task.id
+
+    def test_task_submission_returns_only_aggregate_judge_feedback(self):
+        app = self.create_app()
+        task_id = self._create_code_task(app)
+        self.create_student(app)
+        private_report = {
+            'mode': 'stdin_stdout',
+            'runner': 'stdin_stdout',
+            'language': 'python',
+            'passed': False,
+            'score': 0,
+            'feedback': 'PRIVATE_FEEDBACK_MARKER',
+            'tests_passed': 0,
+            'tests_total': 1,
+            'results': [
+                {
+                    'label': 'PRIVATE_TEST_LABEL',
+                    'input': 'PRIVATE_TEST_INPUT',
+                    'expected': 'PRIVATE_TEST_EXPECTED',
+                    'actual': 'PRIVATE_TEST_ACTUAL',
+                    'stderr': 'PRIVATE_TEST_STDERR',
+                    'passed': False,
+                    'duration_ms': 7,
+                    'error_type': 'runtime_error',
+                }
+            ],
+            'compile_error': 'PRIVATE_TEST_COMPILE_ERROR',
+            'runtime_error': 'PRIVATE_TEST_RUNTIME_ERROR',
+            'time_limit_ms': 2000,
+            'memory_limit_mb': 128,
+        }
+
+        with app.test_client() as client, patch(
+            'app.api.student.judge_task_submission', return_value=private_report
+        ):
+            self.login(client)
+            response = client.post(
+                f'/api/tasks/{task_id}/submit', json={'answer': 'print(input())'}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        raw_response = response.get_data(as_text=True)
+        for secret in (
+            'PRIVATE_FEEDBACK_MARKER',
+            'PRIVATE_TEST_LABEL',
+            'PRIVATE_TEST_INPUT',
+            'PRIVATE_TEST_EXPECTED',
+            'PRIVATE_TEST_ACTUAL',
+            'PRIVATE_TEST_STDERR',
+            'PRIVATE_TEST_COMPILE_ERROR',
+            'PRIVATE_TEST_RUNTIME_ERROR',
+        ):
+            self.assertNotIn(secret, raw_response)
+        judge_report = response.get_json()['judge_report']
+        self.assertEqual(judge_report['results'], [])
+        self.assertEqual(judge_report['tests_passed'], 0)
+        self.assertEqual(judge_report['tests_total'], 1)
+
+    def test_task_submission_hides_runner_error_details(self):
+        app = self.create_app()
+        task_id = self._create_code_task(app)
+        self.create_student(app)
+        from app.api.student import CodeJudgeUnavailableError
+
+        with app.test_client() as client, patch(
+            'app.api.student.judge_task_submission',
+            side_effect=CodeJudgeUnavailableError('PRIVATE_RUNNER_ERROR'),
+        ):
+            self.login(client)
+            response = client.post(
+                f'/api/tasks/{task_id}/submit', json={'answer': 'print(input())'}
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn('PRIVATE_RUNNER_ERROR', response.get_data(as_text=True))
+
+
+# =====================================================================================
 # C-03: password-change re-auth + session bump
 # =====================================================================================
 

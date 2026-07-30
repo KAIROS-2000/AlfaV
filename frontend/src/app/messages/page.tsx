@@ -17,7 +17,8 @@ export default async function MessagesPage({
 	if (
 		session.user.role !== 'student' &&
 		session.user.role !== 'teacher' &&
-		session.user.role !== 'parent'
+		session.user.role !== 'parent' &&
+		session.user.role !== 'manager'
 	) {
 		redirect('/dashboard')
 	}

@@ -13,7 +13,6 @@ from ..core.code_judge import (
     CodeJudgeConfigurationError,
     CodeJudgeUnavailableError,
     judge_task_submission,
-    summarize_judge_report,
 )
 from ..core.assignment_sync import sync_student_assignment_submissions_for_lesson
 from ..core.achievements import sync_achievements_for_user
@@ -87,6 +86,10 @@ LESSON_PARTICIPANT_ROLES: list[UserRole] = [
     UserRole.ADMIN,
     UserRole.SUPERADMIN,
 ]
+_CURRICULUM_ADMIN_ROLES = frozenset({UserRole.ADMIN, UserRole.SUPERADMIN})
+_PUBLIC_CURRICULUM_ROLES = frozenset(
+    {UserRole.STUDENT, UserRole.PARENT, UserRole.TEACHER}
+)
 _STAFF_LEADERBOARD_ROLES = frozenset({UserRole.ADMIN, UserRole.SUPERADMIN})
 _AGE_GROUP_RANK = {"junior": 0, "middle": 1, "senior": 2}
 LEADERBOARD_LIMIT = 50
@@ -413,26 +416,57 @@ def _uses_forced_lesson_sequence(user: User) -> bool:
     return user.role in FORCED_SEQUENCE_ROLES
 
 
-def _user_can_access_lesson(user: User, lesson: Lesson) -> bool:
-    module = lesson.module
-    if module.is_published:
+def _user_can_access_module(user: User, module: Module | None) -> bool:
+    """Allow curriculum access only for an explicitly authorized audience."""
+    if module is None:
+        return False
+    if user.role in _CURRICULUM_ADMIN_ROLES:
         return True
+
     classroom_id = module.custom_classroom_id
-    if classroom_id is None:
-        return user.role != UserRole.STUDENT
-    if user.role == UserRole.STUDENT:
-        return (
-            ClassMembership.query.filter_by(
-                classroom_id=classroom_id, student_id=user.id
-            ).first()
-            is not None
-        )
-    if user.role == UserRole.TEACHER:
-        return (
-            Classroom.query.filter_by(id=classroom_id, teacher_id=user.id).first()
-            is not None
-        )
-    return True
+    if classroom_id is not None:
+        if user.role == UserRole.STUDENT:
+            return (
+                ClassMembership.query.filter_by(
+                    classroom_id=classroom_id, student_id=user.id
+                ).first()
+                is not None
+            )
+        if user.role == UserRole.TEACHER:
+            return (
+                Classroom.query.filter_by(id=classroom_id, teacher_id=user.id).first()
+                is not None
+            )
+        return False
+
+    return bool(
+        module.is_published and user.role in _PUBLIC_CURRICULUM_ROLES
+    )
+
+
+def _user_can_access_lesson(user: User, lesson: Lesson | None) -> bool:
+    if lesson is None or lesson.module is None:
+        return False
+    if user.role in _CURRICULUM_ADMIN_ROLES:
+        return True
+    if not _user_can_access_module(user, lesson.module):
+        return False
+    if lesson.module.is_custom_classroom_module:
+        return True
+    return bool(lesson.is_published)
+
+
+def _lesson_payload_for_user(
+    user: User, lesson: Lesson, *, include_private: bool = False
+) -> dict:
+    """Serialize a lesson without exposing sibling drafts in its module."""
+    payload = lesson.to_dict(include_private=include_private)
+    payload["module"]["lessons"] = [
+        item.to_summary_dict()
+        for item in lesson.module.lessons
+        if _user_can_access_lesson(user, item)
+    ]
+    return payload
 
 
 def _effective_lesson_state_for_user(user: User, lesson: Lesson) -> str:
@@ -548,15 +582,27 @@ def bootstrap_public():
         .order_by(Module.order_index.asc())
         .all()
     )
+    modules = [module for module in modules if not module.is_custom_classroom_module]
+    featured_modules = []
+    published_lessons_count = 0
+    for module in modules:
+        published_lessons = [
+            lesson.to_summary_dict()
+            for lesson in module.lessons
+            if lesson.is_published
+        ]
+        published_lessons_count += len(published_lessons)
+        if len(featured_modules) < 4:
+            featured_modules.append(
+                {**module.to_dict(), "lessons": published_lessons}
+            )
     return {
         "stats": {
             "modules": len(modules),
-            "lessons": sum(len(module.lessons) for module in modules),
-            "roles": 5,
+            "lessons": published_lessons_count,
+            "roles": len(UserRole),
         },
-        "featured_modules": [
-            module.to_dict(include_lessons=True) for module in modules[:4]
-        ],
+        "featured_modules": featured_modules,
     }
 
 
@@ -594,7 +640,11 @@ def dashboard(current_user: User):
             .all()
         )
         for module in modules:
+            if not _user_can_access_module(current_user, module):
+                continue
             for idx, lesson in enumerate(module.lessons):
+                if not _user_can_access_lesson(current_user, lesson):
+                    continue
                 state = _lesson_state_for_user(current_user, module, lesson, idx)
                 if state == "current":
                     continue_lesson = {
@@ -684,8 +734,12 @@ def list_modules(current_user: User):
     )
     payload = []
     for module in modules:
+        if not _user_can_access_module(current_user, module):
+            continue
         lessons = []
         for idx, lesson in enumerate(module.lessons):
+            if not _user_can_access_lesson(current_user, lesson):
+                continue
             progress = UserProgress.query.filter_by(
                 user_id=current_user.id, lesson_id=lesson.id
             ).first()
@@ -704,8 +758,12 @@ def list_modules(current_user: User):
 @auth_required()
 def module_lessons(current_user: User, module_id: int):
     module = Module.query.get_or_404(module_id)
+    if not _user_can_access_module(current_user, module):
+        return {"message": "У вас нет доступа к этому модулю."}, 403
     lessons = []
     for idx, lesson in enumerate(module.lessons):
+        if not _user_can_access_lesson(current_user, lesson):
+            continue
         progress = UserProgress.query.filter_by(
             user_id=current_user.id, lesson_id=lesson.id
         ).first()
@@ -769,7 +827,9 @@ def get_lesson(current_user: User, lesson_id: int):
     include_quiz_review = progress.status in {"completed", "pending_review"}
     finished = state == STATE_MAP["completed"] or progress.status == "completed"
     return {
-        "lesson": lesson.to_dict(include_private=include_quiz_review),
+        "lesson": _lesson_payload_for_user(
+            current_user, lesson, include_private=include_quiz_review
+        ),
         "state": state,
         "progress": progress.to_dict(),
         "is_finished": finished,
@@ -870,6 +930,61 @@ def complete_lesson(current_user: User, lesson_id: int):
     }
 
 
+def _learner_safe_judge_feedback(
+    *, mode: str, passed: bool, tests_passed: int, tests_total: int
+) -> str:
+    if passed:
+        return f"Автопроверка пройдена: {tests_passed}/{tests_total} тестов."
+    if mode == "stdin_stdout":
+        return (
+            f"Пройдено {tests_passed} из {tests_total} тестов. "
+            "Проверь решение и попробуй ещё раз."
+        )
+    if mode == "keywords":
+        return (
+            f"Найдено {tests_passed} из {tests_total} ориентиров. "
+            "Проверь ответ и попробуй ещё раз."
+        )
+    return "Автопроверка не пройдена. Проверь решение и попробуй ещё раз."
+
+
+def _learner_safe_judge_report(
+    report: dict[str, Any], *, validation: dict[str, Any]
+) -> dict[str, Any]:
+    """Return aggregate grading feedback without exposing private judge data."""
+    mode = validation["evaluation_mode"]
+    tests_total = _coerce_nonnegative_int(report.get("tests_total"))
+    tests_passed = min(
+        _coerce_nonnegative_int(report.get("tests_passed")), tests_total
+    )
+    passed = bool(report.get("passed"))
+    score = min(_coerce_nonnegative_int(report.get("score")), 100)
+    return {
+        "mode": mode,
+        "runner": "stdin_stdout" if mode == "stdin_stdout" else None,
+        "language": validation.get("language"),
+        "passed": passed,
+        "score": score,
+        "feedback": _learner_safe_judge_feedback(
+            mode=mode,
+            passed=passed,
+            tests_passed=tests_passed,
+            tests_total=tests_total,
+        ),
+        "tests_passed": tests_passed,
+        "tests_total": tests_total,
+        # Per-case data can disclose hidden inputs through input, expected, actual,
+        # stderr, or labels. Learners receive aggregate results only.
+        "results": [],
+        "time_limit_ms": (
+            validation.get("time_limit_ms") if mode == "stdin_stdout" else None
+        ),
+        "memory_limit_mb": (
+            validation.get("memory_limit_mb") if mode == "stdin_stdout" else None
+        ),
+    }
+
+
 def _compute_task_evaluation(
     task: Task, raw_answer: str
 ) -> tuple[dict[str, Any] | None, tuple[dict[str, Any], int] | None]:
@@ -890,11 +1005,14 @@ def _compute_task_evaluation(
         if not has_answer:
             return None, ({"message": "Сначала добавь решение в редактор."}, 400)
         try:
-            judge_report = judge_task_submission(task, raw_answer)
-        except CodeJudgeConfigurationError as exc:
-            return None, ({"message": str(exc)}, 400)
-        except CodeJudgeUnavailableError as exc:
-            return None, ({"message": str(exc)}, 503)
+            private_judge_report = judge_task_submission(task, raw_answer)
+        except CodeJudgeConfigurationError:
+            return None, ({"message": "Автопроверка задания настроена некорректно."}, 400)
+        except CodeJudgeUnavailableError:
+            return None, ({"message": "Сервис автопроверки временно недоступен."}, 503)
+        judge_report = _learner_safe_judge_report(
+            private_judge_report, validation=validation
+        )
         score = judge_report["score"]
         passed = judge_report["passed"]
         feedback = judge_report["feedback"]
@@ -974,7 +1092,7 @@ def submit_task(current_user: User, task_id: int):
             task.lesson,
             progress,
             answer=raw_answer or None,
-            feedback=summarize_judge_report(judge_report) if judge_report else None,
+            feedback=feedback if judge_report else None,
         )
     if not manual_review_required:
         _award_achievement_if_needed(

@@ -17,6 +17,10 @@
 - красивый roadmap в стиле path‑based learning: крупные пунсоны-узлы соединены линией, состояния уроков видны визуально
 - Docker Compose для фронтенда, бэкенда, PostgreSQL и изолированного `judge-runner`
 
+## Руководства по ролям
+
+Для повседневной работы используйте отдельные инструкции: [суперадминистратор](docs/user-guides/superadmin.md), [администратор](docs/user-guides/admin.md), [учитель](docs/user-guides/teacher.md) и [менеджер](docs/user-guides/manager.md). Общая страница со ссылками находится в [docs/user-guides](docs/user-guides/README.md).
+
 ## Актуальный стек
 
 - Backend: Flask + Flask-SQLAlchemy + PostgreSQL + PyJWT + Gunicorn

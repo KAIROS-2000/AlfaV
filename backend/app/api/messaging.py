@@ -55,9 +55,9 @@ def _ensure_messaging_role(current_user: User) -> tuple[dict, int] | None:
 
 
 def _ensure_messaging_summary_role(current_user: User) -> tuple[dict, int] | None:
-    if current_user.role not in {UserRole.STUDENT, UserRole.TEACHER, UserRole.PARENT}:
+    if current_user.role not in {UserRole.STUDENT, UserRole.TEACHER, UserRole.PARENT, UserRole.MANAGER}:
         return {
-            "message": "Messaging summary is available only to teachers, students, and parents.",
+            "message": "Messaging summary is available only to teachers, students, parents, and managers.",
         }, 403
     return None
 
@@ -381,7 +381,7 @@ def summary(current_user: User):
     }
     if current_user.role == UserRole.TEACHER:
         payload["classes"] = _teacher_summary_classes(current_user, conversations)
-    elif current_user.role == UserRole.PARENT:
+    elif current_user.role in {UserRole.PARENT, UserRole.MANAGER}:
         payload["classes"] = []
     else:
         payload["classes"] = _student_summary_classes(current_user, conversations)

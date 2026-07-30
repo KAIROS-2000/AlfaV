@@ -9,6 +9,9 @@ import type {
 
 const API_URL = PUBLIC_API_URL
 let refreshRequest: Promise<boolean> | null = null
+const CSRF_COOKIE_NAME = 'csrf_token'
+const CSRF_HEADER_NAME = 'X-CSRF-Token'
+const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
 export type AuthMode = 'required' | 'optional' | 'none'
 type ApiAuthOption = AuthMode | boolean | { auth?: AuthMode }
@@ -35,11 +38,28 @@ function resolveAuthMode(option: ApiAuthOption | undefined): AuthMode {
   return option?.auth ?? 'none'
 }
 
+function readCookie(name: string): string | null {
+  if (typeof document === 'undefined') return null
+  const prefix = `${encodeURIComponent(name)}=`
+  const cookie = document.cookie.split('; ').find((entry) => entry.startsWith(prefix))
+  if (!cookie) return null
+  try {
+    return decodeURIComponent(cookie.slice(prefix.length))
+  } catch {
+    return null
+  }
+}
+
 function buildHeaders(init?: RequestInit) {
   const headers = new Headers(init?.headers || {})
   const body = init?.body
   if (body && !(body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
+  }
+  const method = (init?.method || 'GET').toUpperCase()
+  const csrfToken = readCookie(CSRF_COOKIE_NAME)
+  if (UNSAFE_METHODS.has(method) && csrfToken && !headers.has(CSRF_HEADER_NAME)) {
+    headers.set(CSRF_HEADER_NAME, csrfToken)
   }
   return headers
 }
@@ -162,6 +182,7 @@ async function refreshSession() {
 
   refreshRequest = fetch(`${API_URL}/auth/refresh`, {
     method: 'POST',
+    headers: buildHeaders({ method: 'POST' }),
     cache: 'no-store',
     credentials: 'same-origin',
   })
@@ -191,6 +212,7 @@ export async function clearSessionSilently(options: ClearSessionOptions = {}) {
   try {
     await fetch(`${API_URL}/auth/logout`, {
       method: 'POST',
+      headers: buildHeaders({ method: 'POST' }),
       cache: 'no-store',
       credentials: 'same-origin',
     })

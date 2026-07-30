@@ -1,7 +1,7 @@
 export type { AppTheme } from '@/lib/theme'
 import type { AppTheme } from '@/lib/theme'
 
-export type UserRole = 'student' | 'teacher' | 'parent' | 'admin' | 'superadmin'
+export type UserRole = 'student' | 'teacher' | 'parent' | 'manager' | 'admin' | 'superadmin'
 export type TeacherApprovalStatus = 'pending' | 'approved' | 'rejected'
 export type ProgressStatus = 'not_started' | 'in_progress' | 'pending_review' | 'needs_revision' | 'completed'
 export type SubmissionStatus = 'submitted' | 'pending_review' | 'checked' | 'needs_revision'
@@ -195,6 +195,52 @@ export interface AdminAdminDirectoryResponse {
     email: string
     status: 'all' | 'active' | 'blocked'
   }
+}
+
+export interface AdminManagerDirectoryResponse {
+  managers: AdminUserListItem[]
+  pagination: PaginationMeta
+  filters: {
+    email: string
+    status: 'all' | 'active' | 'blocked'
+  }
+}
+
+export interface ContactListItem {
+  id: number
+  full_name: string
+  email: string
+  phone: string | null
+  role: UserRole
+  is_active: boolean
+  email_verified: boolean
+  linked_children: string[]
+}
+
+export interface ContactsDirectoryResponse {
+  contacts: ContactListItem[]
+  pagination: PaginationMeta
+  filters: {
+    q: string
+    roles: string[]
+    status: 'all' | 'active' | 'blocked'
+    verified: boolean | null
+    parent_link: 'all' | 'linked' | 'unlinked'
+  }
+  available_roles: string[]
+}
+
+export interface BroadcastFilters {
+  roles: Array<'student' | 'teacher' | 'parent'>
+  age_group: 'all' | 'junior' | 'middle' | 'senior'
+  verified: boolean | null
+  parent_link: 'all' | 'linked' | 'unlinked'
+}
+
+export interface BroadcastPreviewResponse {
+  recipient_count: number
+  by_role: Record<string, number>
+  filters: BroadcastFilters
 }
 
 export interface AdminTeacherRequestsResponse {

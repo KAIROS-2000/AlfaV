@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from flask import Blueprint, current_app, request, send_file
 from sqlalchemy import case, func, or_
@@ -12,7 +13,9 @@ from ..core.security import (
     auth_required,
     hash_password,
     invalidate_session_version_cache,
+    register_staff_broadcast_attempt,
     revoke_refresh_tokens_for_user,
+    staff_broadcast_attempt_allowed,
     validate_password,
 )
 from ..models.learning import (
@@ -65,6 +68,10 @@ DEFAULT_DIRECTORY_PAGE_SIZE = 20
 MAX_DIRECTORY_PAGE_SIZE = 100
 VISIBLE_USER_ROLES = (UserRole.STUDENT, UserRole.TEACHER)
 MANAGED_ADMIN_ROLES = (UserRole.ADMIN,)
+MANAGED_MANAGER_ROLES = (UserRole.MANAGER,)
+BROADCAST_RECIPIENT_ROLES = (UserRole.STUDENT, UserRole.TEACHER, UserRole.PARENT)
+CONTACT_ROLE_VALUES = {role.value for role in BROADCAST_RECIPIENT_ROLES}
+STAFF_BROADCAST_ROLES = (UserRole.MANAGER, UserRole.SUPERADMIN)
 VALID_STATUS_FILTERS = {'all', 'active', 'blocked'}
 VALID_TEACHER_REQUEST_FILTERS = {'all', *TEACHER_APPROVAL_STATUSES}
 
@@ -165,6 +172,130 @@ def _serialize_admin_user(user: User) -> dict:
         'created_at': user.created_at.isoformat() if user.created_at else None,
         'last_login_at': user.last_login_at.isoformat() if user.last_login_at else None,
     }
+
+
+def _parse_role_filters(value, *, allowed: tuple[UserRole, ...] | None = None) -> tuple[UserRole, ...]:
+    raw = value if isinstance(value, list) else _split_csv(str(value or ''))
+    selected = {str(item).strip().lower() for item in raw if str(item).strip()}
+    roles = tuple(role for role in UserRole if role.value in selected)
+    if allowed is not None:
+        allowed_set = set(allowed)
+        roles = tuple(role for role in roles if role in allowed_set)
+    return roles
+
+
+def _parse_bool_filter(value: str | None) -> bool | None:
+    normalized = str(value or '').strip().lower()
+    if normalized in {'yes', 'true', '1'}:
+        return True
+    if normalized in {'no', 'false', '0'}:
+        return False
+    return None
+
+
+def _contacts_query(*, args) -> tuple[object, dict]:
+    query_text = str(args.get('q') or '').strip()
+    status = _normalize_status_filter(args.get('status'))
+    roles_were_provided = 'roles' in args
+    roles = _parse_role_filters(args.get('roles'), allowed=BROADCAST_RECIPIENT_ROLES)
+    verified = _parse_bool_filter(args.get('verified'))
+    parent_link = str(args.get('parent_link') or 'all').strip().lower()
+    if parent_link not in {'all', 'linked', 'unlinked'}:
+        parent_link = 'all'
+
+    query = User.query.filter(User.role.in_(BROADCAST_RECIPIENT_ROLES))
+    if query_text:
+        pattern = f'%{query_text}%'
+        query = query.filter(or_(User.full_name.ilike(pattern), User.email.ilike(pattern), User.phone.ilike(pattern)))
+    if roles_were_provided:
+        query = query.filter(User.role.in_(roles))
+    if status == 'active':
+        query = query.filter(User.is_active.is_(True))
+    elif status == 'blocked':
+        query = query.filter(User.is_active.is_(False))
+    if verified is not None:
+        query = query.filter(User.email_verified.is_(verified))
+    if parent_link != 'all':
+        linked_parent_ids = db.session.query(ParentChildLink.parent_user_id).filter(
+            ParentChildLink.active.is_(True), ParentChildLink.revoked_at.is_(None)
+        )
+        query = query.filter(User.role == UserRole.PARENT)
+        query = query.filter(User.id.in_(linked_parent_ids) if parent_link == 'linked' else ~User.id.in_(linked_parent_ids))
+    return query, {
+        'q': query_text,
+        'roles': [role.value for role in roles],
+        'status': status,
+        'verified': verified,
+        'parent_link': parent_link,
+    }
+
+
+def _contact_payload(users: list[User]) -> list[dict]:
+    user_ids = [user.id for user in users]
+    children_by_parent: dict[int, list[str]] = {}
+    if user_ids:
+        rows = (
+            db.session.query(ParentChildLink.parent_user_id, User.full_name)
+            .join(User, User.id == ParentChildLink.child_user_id)
+            .filter(
+                ParentChildLink.parent_user_id.in_(user_ids),
+                ParentChildLink.active.is_(True),
+                ParentChildLink.revoked_at.is_(None),
+            )
+            .order_by(User.full_name.asc(), User.id.asc())
+            .all()
+        )
+        for parent_id, child_name in rows:
+            children_by_parent.setdefault(parent_id, []).append(child_name)
+    return [
+        {
+            'id': user.id,
+            'full_name': user.full_name,
+            'email': user.email,
+            'phone': user.phone,
+            'role': user.role.value,
+            'is_active': user.is_active,
+            'email_verified': bool(user.email_verified),
+            'linked_children': children_by_parent.get(user.id, []),
+        }
+        for user in users
+    ]
+
+
+def _broadcast_recipients(filters: dict) -> tuple[list[User], dict]:
+    roles_were_provided = 'roles' in filters
+    roles = _parse_role_filters(filters.get('roles'), allowed=BROADCAST_RECIPIENT_ROLES)
+    effective_roles = roles if roles_were_provided else BROADCAST_RECIPIENT_ROLES
+    normalized_filters = {
+        'roles': [role.value for role in effective_roles],
+        'age_group': 'all',
+        'verified': None,
+        'parent_link': 'all',
+    }
+    if not effective_roles:
+        return [], normalized_filters
+    query = User.query.filter(User.is_active.is_(True))
+    query = query.filter(User.role.in_(effective_roles))
+    age_group = str(filters.get('age_group') or 'all').strip().lower()
+    if age_group in {'junior', 'middle', 'senior'}:
+        query = query.filter(User.age_group == age_group)
+    verified = _parse_bool_filter(filters.get('verified'))
+    if verified is not None:
+        query = query.filter(User.email_verified.is_(verified))
+    parent_link = str(filters.get('parent_link') or 'all').strip().lower()
+    if parent_link in {'linked', 'unlinked'}:
+        linked_parent_ids = db.session.query(ParentChildLink.parent_user_id).filter(
+            ParentChildLink.active.is_(True), ParentChildLink.revoked_at.is_(None)
+        )
+        query = query.filter(User.role == UserRole.PARENT)
+        query = query.filter(User.id.in_(linked_parent_ids) if parent_link == 'linked' else ~User.id.in_(linked_parent_ids))
+    users = query.order_by(User.id.asc()).all()
+    normalized_filters.update({
+        'age_group': age_group if age_group in {'junior', 'middle', 'senior'} else 'all',
+        'verified': verified,
+        'parent_link': parent_link if parent_link in {'all', 'linked', 'unlinked'} else 'all',
+    })
+    return users, normalized_filters
 
 
 def _list_users_for_roles(role_filters: tuple[UserRole, ...]) -> tuple[list[User], dict, dict]:
@@ -1030,6 +1161,108 @@ def admins(current_user: User):
     }
 
 
+@admin_bp.get('/managers')
+@auth_required([UserRole.SUPERADMIN])
+def managers(current_user: User):
+    items, pagination, filters = _list_users_for_roles(MANAGED_MANAGER_ROLES)
+    return {
+        'managers': [_serialize_admin_user(user) for user in items],
+        'pagination': pagination,
+        'filters': filters,
+    }
+
+
+@admin_bp.get('/contacts')
+@auth_required(list(STAFF_BROADCAST_ROLES))
+def contacts(current_user: User):
+    query, filters = _contacts_query(args=request.args)
+    page = _safe_int(request.args.get('page'), 1, minimum=1)
+    page_size = _safe_int(request.args.get('page_size'), DEFAULT_DIRECTORY_PAGE_SIZE, minimum=1, maximum=MAX_DIRECTORY_PAGE_SIZE)
+    query = query.order_by(User.full_name.asc(), User.id.asc())
+    total = query.count()
+    users = query.offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        'contacts': _contact_payload(users),
+        'pagination': _pagination_payload(total, page, page_size),
+        'filters': filters,
+        'available_roles': sorted(CONTACT_ROLE_VALUES),
+    }
+
+
+@admin_bp.post('/broadcasts/preview')
+@auth_required(list(STAFF_BROADCAST_ROLES))
+def preview_broadcast(current_user: User):
+    data = request.get_json(silent=True) or {}
+    recipients, filters = _broadcast_recipients(data.get('filters') if isinstance(data.get('filters'), dict) else {})
+    by_role = {role.value: 0 for role in BROADCAST_RECIPIENT_ROLES}
+    for recipient in recipients:
+        by_role[recipient.role.value] = by_role.get(recipient.role.value, 0) + 1
+    return {'recipient_count': len(recipients), 'by_role': by_role, 'filters': filters}
+
+
+@admin_bp.post('/broadcasts')
+@auth_required(list(STAFF_BROADCAST_ROLES))
+def create_broadcast(current_user: User):
+    if not staff_broadcast_attempt_allowed(current_user.id):
+        return {
+            'message': 'Превышен лимит рассылок. Повторите попытку позже.',
+            'code': 'rate_limited',
+        }, 429
+
+    data = request.get_json(silent=True) or {}
+    title = ' '.join(str(data.get('title') or '').split())
+    body = str(data.get('body') or '').strip()
+    if not title or not body:
+        return {'message': 'Укажите заголовок и текст рассылки.'}, 400
+    if len(title) > 200 or len(body) > 4000:
+        return {'message': 'Заголовок должен быть до 200 символов, текст — до 4000.'}, 400
+
+    recipients, filters = _broadcast_recipients(data.get('filters') if isinstance(data.get('filters'), dict) else {})
+    if not recipients:
+        return {'message': 'По выбранным фильтрам нет активных получателей.'}, 400
+
+    campaign_id = uuid4().hex
+    email_statuses: dict[str, int] = {}
+    for recipient in recipients:
+        result = notifications.notify_user(
+            recipient,
+            event_type='manager_broadcast',
+            title=title,
+            body=body,
+            href='/dashboard',
+            actor=current_user,
+            email_category=notifications.CATEGORY_STAFF,
+            metadata={'campaign_id': campaign_id, 'audience': filters},
+            related_type='broadcast',
+            related_id=None,
+            dedupe_key=f'broadcast:{campaign_id}:{recipient.id}',
+        )
+        status = str(result.get('email_status') or 'unknown')
+        email_statuses[status] = email_statuses.get(status, 0) + 1
+
+    register_staff_broadcast_attempt(current_user.id)
+    _log_admin_action(
+        current_user,
+        action='broadcast_sent',
+        entity_type='broadcast',
+        entity_id=None,
+        entity_label=title,
+        details={
+            'campaign_id': campaign_id,
+            'recipient_count': len(recipients),
+            'filters': filters,
+            'email_statuses': email_statuses,
+        },
+    )
+    db.session.commit()
+    return {
+        'campaign_id': campaign_id,
+        'recipient_count': len(recipients),
+        'email_statuses': email_statuses,
+        'filters': filters,
+    }, 201
+
+
 @admin_bp.get('/modules')
 @auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
 def list_modules(current_user: User):
@@ -1256,6 +1489,102 @@ def create_admin(current_user: User):
     )
     db.session.commit()
     return {'user': admin.to_dict()}, 201
+
+
+@admin_bp.post('/managers')
+@auth_required([UserRole.SUPERADMIN])
+def create_manager(current_user: User):
+    data = request.get_json() or {}
+    email = (data.get('email') or '').strip().lower()
+    password = data.get('password') or ''
+    password_error = validate_password(password, minimum_length=ADMIN_PASSWORD_MIN_LENGTH)
+    if not email:
+        return {'message': 'Укажите email нового менеджера.'}, 400
+    if password_error:
+        return {'message': password_error}, 400
+    if User.query.filter_by(email=email).first():
+        return {'message': 'Пользователь уже существует'}, 409
+
+    manager = User(
+        full_name=(data.get('full_name') or 'Менеджер').strip() or 'Менеджер',
+        email=email,
+        phone=(data.get('phone') or '').strip() or None,
+        password_hash=hash_password(password),
+        role=UserRole.MANAGER,
+        age_group='adult',
+        xp=0,
+    )
+    if manager.phone and User.query.filter_by(phone=manager.phone).first():
+        return {'message': 'Пользователь с таким номером телефона уже существует.'}, 409
+    db.session.add(manager)
+    db.session.flush()
+    _log_admin_action(
+        current_user,
+        action='manager_created',
+        entity_type='manager',
+        entity_id=manager.id,
+        entity_label=manager.email,
+        details={
+            'target_name': manager.full_name,
+            'target_email': manager.email,
+            'target_role': manager.role.value,
+            'status': 'active',
+        },
+    )
+    db.session.commit()
+    return {'user': manager.to_dict()}, 201
+
+
+def _ensure_manager_target(user: User):
+    if user.role != UserRole.MANAGER:
+        return {'message': 'Эта учётная запись не является менеджером.'}, 400
+    return None
+
+
+@admin_bp.patch('/managers/<int:user_id>/block')
+@auth_required([UserRole.SUPERADMIN])
+def block_manager(current_user: User, user_id: int):
+    if user_id == current_user.id:
+        return {'message': 'Нельзя заблокировать самого себя.'}, 400
+    user = User.query.get_or_404(user_id)
+    error = _ensure_manager_target(user)
+    if error:
+        return error
+    user.is_active = False
+    user.bump_session_version()
+    invalidate_session_version_cache(user.id)
+    revoke_refresh_tokens_for_user(user.id)
+    _log_admin_action(current_user, action='manager_blocked', entity_type='manager', entity_id=user.id, entity_label=user.email)
+    db.session.commit()
+    return {'user': user.to_dict()}
+
+
+@admin_bp.patch('/managers/<int:user_id>/unblock')
+@auth_required([UserRole.SUPERADMIN])
+def unblock_manager(current_user: User, user_id: int):
+    user = User.query.get_or_404(user_id)
+    error = _ensure_manager_target(user)
+    if error:
+        return error
+    user.is_active = True
+    _log_admin_action(current_user, action='manager_unblocked', entity_type='manager', entity_id=user.id, entity_label=user.email)
+    db.session.commit()
+    return {'user': user.to_dict()}
+
+
+@admin_bp.delete('/managers/<int:user_id>')
+@auth_required([UserRole.SUPERADMIN])
+def delete_manager(current_user: User, user_id: int):
+    user = User.query.get_or_404(user_id)
+    error = _ensure_manager_target(user)
+    if error:
+        return error
+    revoke_refresh_tokens_for_user(user.id)
+    invalidate_session_version_cache(user.id)
+    _log_admin_action(current_user, action='manager_deleted', entity_type='manager', entity_id=user.id, entity_label=user.email)
+    db.session.delete(user)
+    db.session.commit()
+    return {'message': 'Менеджер удалён.'}
 
 
 @admin_bp.patch('/admins/<int:user_id>/block')

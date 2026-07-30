@@ -90,6 +90,7 @@ class MigrationDisciplineTests(unittest.TestCase):
         self.assertIn('0007_teacher_approval_status', revisions)
         self.assertIn('0008_teacher_rejection_expiration', revisions)
         self.assertIn('0021_user_notifications', revisions)
+        self.assertIn('0023_manager_role_enum_compatibility', revisions)
 
 
 if __name__ == '__main__':

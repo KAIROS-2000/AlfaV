@@ -31,6 +31,7 @@ function cabinetPathForRole(role: UserRole | undefined): string {
 	if (role === 'teacher') return '/teacher'
 	if (role === 'admin') return '/admin/users'
 	if (role === 'superadmin') return '/superadmin/users'
+	if (role === 'manager') return '/manager/contacts'
 	return '/dashboard'
 }
 

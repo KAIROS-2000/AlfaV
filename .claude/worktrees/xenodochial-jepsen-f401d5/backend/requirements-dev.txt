@@ -1,2 +1,0 @@
-# Dev / CI extras (install alongside backend/requirements.txt)
-fakeredis>=2.23.0

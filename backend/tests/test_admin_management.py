@@ -1242,6 +1242,102 @@ class AdminManagementRegressionTests(unittest.TestCase):
             self.assertEqual(body['site_activity_logs'][0]['user_id'], admin_id)
             self.assertEqual(body['filters']['sort'], 'path')
 
+    def test_superadmin_creates_manager_with_contacts_and_broadcast_only(self):
+        app = self.create_app()
+        app.config['STAFF_BROADCAST_RATE_LIMIT_MAX_REQUESTS'] = 1
+        self.create_user(
+            app,
+            full_name='Root User',
+            email='root@example.com',
+            password='RootPass123!',
+            role='superadmin',
+            age_group='adult',
+        )
+        child_id = self.create_user(
+            app,
+            full_name='Child Example',
+            email='child@example.com',
+            password='ChildPass123!',
+            role='student',
+            age_group='middle',
+        )
+        parent_id = self.create_user(
+            app,
+            full_name='Parent Example',
+            email='parent@example.com',
+            password='ParentPass123!',
+            role='parent',
+            age_group=None,
+        )
+        with app.app_context():
+            from app.core.db import db
+            from app.models.parent_cabinet import ParentChildLink
+
+            db.session.add(ParentChildLink(parent_user_id=parent_id, child_user_id=child_id))
+            db.session.commit()
+
+        with app.test_client() as superadmin_client:
+            self.assertEqual(self.login(superadmin_client, 'root@example.com', 'RootPass123!').status_code, 200)
+            created = superadmin_client.post(
+                '/api/admin/managers',
+                json={
+                    'full_name': 'Manager Example',
+                    'email': 'manager@example.com',
+                    'phone': '+79990001122',
+                    'password': 'ManagerPass123!',
+                },
+            )
+            self.assertEqual(created.status_code, 201)
+            self.assertEqual(created.get_json()['user']['role'], 'manager')
+
+        with app.test_client() as manager_client:
+            self.assertEqual(self.login(manager_client, 'manager@example.com', 'ManagerPass123!').status_code, 200)
+            self.assertEqual(manager_client.get('/api/admin/users').status_code, 403)
+            self.assertEqual(manager_client.get('/api/messaging/summary').status_code, 200)
+            contacts = manager_client.get('/api/admin/contacts?roles=parent&parent_link=linked')
+            self.assertEqual(contacts.status_code, 200)
+            contact = contacts.get_json()['contacts'][0]
+            self.assertEqual(contact['email'], 'parent@example.com')
+            self.assertEqual(contact['linked_children'], ['Child Example'])
+            self.assertEqual(set(contact), {'id', 'full_name', 'email', 'phone', 'role', 'is_active', 'email_verified', 'linked_children'})
+            staff_contacts = manager_client.get('/api/admin/contacts?roles=manager')
+            self.assertEqual(staff_contacts.status_code, 200)
+            self.assertEqual(staff_contacts.get_json()['contacts'], [])
+
+            empty_preview = manager_client.post('/api/admin/broadcasts/preview', json={'filters': {'roles': []}})
+            self.assertEqual(empty_preview.status_code, 200)
+            self.assertEqual(empty_preview.get_json()['recipient_count'], 0)
+            preview = manager_client.post('/api/admin/broadcasts/preview', json={'filters': {'roles': ['parent']}})
+            self.assertEqual(preview.status_code, 200)
+            self.assertEqual(preview.get_json()['recipient_count'], 1)
+            sent = manager_client.post(
+                '/api/admin/broadcasts',
+                json={
+                    'title': 'Platform update',
+                    'body': 'A useful update for the family.',
+                    'filters': {'roles': ['parent']},
+                },
+            )
+            self.assertEqual(sent.status_code, 201)
+            self.assertEqual(sent.get_json()['recipient_count'], 1)
+            blocked = manager_client.post(
+                '/api/admin/broadcasts',
+                json={
+                    'title': 'Second update',
+                    'body': 'This message must be rate limited.',
+                    'filters': {'roles': ['parent']},
+                },
+            )
+            self.assertEqual(blocked.status_code, 429)
+            self.assertEqual(blocked.get_json()['code'], 'rate_limited')
+
+        with app.app_context():
+            from app.models.notifications import UserNotification
+            from app.models.user import AdminAuditLog
+
+            self.assertEqual(UserNotification.query.filter_by(recipient_user_id=parent_id, type='manager_broadcast').count(), 1)
+            self.assertEqual(AdminAuditLog.query.filter_by(action='broadcast_sent').count(), 1)
+
 
 if __name__ == '__main__':
     unittest.main()

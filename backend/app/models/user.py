@@ -14,6 +14,7 @@ class UserRole(enum.Enum):
     STUDENT = 'student'
     TEACHER = 'teacher'
     PARENT = 'parent'
+    MANAGER = 'manager'
     ADMIN = 'admin'
     SUPERADMIN = 'superadmin'
 

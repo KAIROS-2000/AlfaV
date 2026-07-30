@@ -1,5 +1,6 @@
 'use client'
 
+import Image from 'next/image'
 import Link from 'next/link'
 import { useMemo, useRef, useState } from 'react'
 import {
@@ -16,7 +17,10 @@ import {
 	Database,
 	LockKeyhole,
 	MapPin,
+	MessageCircle,
 	MonitorSmartphone,
+	PhoneCall,
+	Send,
 	ShieldCheck,
 	Sparkles,
 	TrendingUp,
@@ -242,6 +246,13 @@ const roadmap = [
 		text: 'Стажировка, junior-позиция, олимпиадный профиль, фриланс или проектная роль в команде.',
 	},
 ]
+
+const companyContacts = {
+	telegram: 'https://t.me/progyx56_bot',
+	max: 'https://max.ru/u/f9LH2cuN5hhtdRqQjq3gk8OKA3jdxYxsrqV6KxpnS_cu78Df6d3Wcy5IT1k',
+	phone: '+7 (3532) 90-21-33',
+	phoneHref: 'tel:+73532902133',
+}
 
 export function ItCareerPage() {
 	const rootRef = useRef<HTMLElement | null>(null)
@@ -488,25 +499,99 @@ export function ItCareerPage() {
 			</section>
 
 			<section className='brand-page-shell it-career-road' data-motion-reveal>
-				<div className='it-career-road__panel'>
-					<div className='it-career-section-head it-career-section-head--compact'>
-						<p className='it-career-eyebrow'>Маршрут до рынка</p>
-						<h2>Работа в IT начинается не с резюме, а с траектории.</h2>
+				<div className='it-career-road__layout'>
+					<div className='it-career-road__panel'>
+						<div className='it-career-section-head it-career-section-head--compact'>
+							<p className='it-career-eyebrow'>Маршрут до рынка</p>
+							<h2>Работа в IT начинается не с резюме, а с траектории.</h2>
+						</div>
+
+						<div className='it-career-road__steps'>
+							{roadmap.map(step => (
+								<article className='it-career-road-step' key={step.stage}>
+									<span>{step.stage}</span>
+									<div>
+										<p>{step.period}</p>
+										<h3>{step.title}</h3>
+										<strong>{step.text}</strong>
+									</div>
+									<ChevronRight aria-hidden='true' size={20} />
+								</article>
+							))}
+						</div>
 					</div>
 
-					<div className='it-career-road__steps'>
-						{roadmap.map(step => (
-							<article className='it-career-road-step' key={step.stage}>
-								<span>{step.stage}</span>
-								<div>
-									<p>{step.period}</p>
-									<h3>{step.title}</h3>
-									<strong>{step.text}</strong>
-								</div>
-								<ChevronRight aria-hidden='true' size={20} />
-							</article>
-						))}
-					</div>
+					<aside className='it-career-contact' aria-labelledby='it-career-contact-title'>
+						<div className='it-career-contact__icon'>
+							<MessageCircle aria-hidden='true' size={25} />
+						</div>
+						<p className='it-career-contact__label'>Поможем выбрать направление</p>
+						<h2 id='it-career-contact-title'>
+							Не гадайте, с чего начинать путь ребёнка в IT.
+						</h2>
+						<p className='it-career-contact__copy'>
+							Напишите возраст и интересы ребёнка. Подскажем подходящее
+							направление, формат старта и первый проект, который даст
+							ощутимый результат.
+						</p>
+
+						<div className='it-career-contact__actions'>
+							<a
+								href={companyContacts.telegram}
+								target='_blank'
+								rel='noreferrer'
+								className='it-career-contact__action it-career-contact__action--telegram'
+							>
+								<span className='it-career-contact__action-icon'>
+									<Send aria-hidden='true' size={18} />
+								</span>
+								<span>
+									<strong>Написать в Telegram</strong>
+									<small>@progyx56_bot</small>
+								</span>
+								<ArrowRight aria-hidden='true' size={17} />
+							</a>
+							<a
+								href={companyContacts.max}
+								target='_blank'
+								rel='noreferrer'
+								className='it-career-contact__action it-career-contact__action--max'
+							>
+								<span className='it-career-contact__action-icon it-career-contact__action-icon--max'>
+									<Image
+										src='/max-logo-violet.png'
+										alt=''
+										aria-hidden='true'
+										width={24}
+										height={24}
+									/>
+								</span>
+								<span>
+									<strong>Написать в MAX</strong>
+									<small>Ответим в чате</small>
+								</span>
+								<ArrowRight aria-hidden='true' size={17} />
+							</a>
+							<a
+								href={companyContacts.phoneHref}
+								className='it-career-contact__action it-career-contact__action--phone'
+							>
+								<span className='it-career-contact__action-icon'>
+									<PhoneCall aria-hidden='true' size={18} />
+								</span>
+								<span>
+									<strong>Позвонить в Progyx</strong>
+									<small>{companyContacts.phone}</small>
+								</span>
+								<ArrowRight aria-hidden='true' size={17} />
+							</a>
+						</div>
+
+						<p className='it-career-contact__note'>
+							<span aria-hidden='true' />
+							В мессенджерах — 24/7, звонки — ежедневно с 10:00 до 20:00
+						</p>
+					</aside>
 				</div>
 			</section>
 

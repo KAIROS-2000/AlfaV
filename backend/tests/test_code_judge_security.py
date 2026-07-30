@@ -194,7 +194,7 @@ class CodeJudgeSecurityTests(unittest.TestCase):
             def build_env(self) -> dict[str, str]:
                 return {'PATH': os.environ.get('PATH', ''), 'PYTHONIOENCODING': 'utf-8'}
 
-            def preexec_fn(self, memory_limit_mb: int, time_limit_ms: int, language: str):  # noqa: ARG002
+            def preexec_fn(self, memory_limit_mb: int, time_limit_ms: int, language: str, execution_uid=None):  # noqa: ANN001, ARG002
                 return None
 
         report = execute_stdio_submission(
@@ -212,6 +212,79 @@ class CodeJudgeSecurityTests(unittest.TestCase):
         self.assertFalse(report['passed'])
         self.assertEqual(report['results'][0]['error_type'], 'timeout')
 
+    def test_shared_engine_stops_unbounded_output_before_buffering_it(self):
+        from shared.judge import JudgeExecutionRequest, JudgeTestCase, async_execute_stdio_submission
+
+        class PythonRuntime:
+            def command_for(self, language: str, script_path: str, memory_limit_mb: int) -> list[str]:  # noqa: ARG002
+                return [sys.executable, '-I', script_path]
+
+            def build_env(self) -> dict[str, str]:
+                return {'PATH': os.environ.get('PATH', ''), 'PYTHONIOENCODING': 'utf-8'}
+
+            def preexec_fn(self, memory_limit_mb: int, time_limit_ms: int, language: str, execution_uid=None):  # noqa: ANN001, ARG002
+                return None
+
+        started_at = time.perf_counter()
+        report = asyncio.run(
+            async_execute_stdio_submission(
+                JudgeExecutionRequest(
+                    language='python',
+                    code="import sys\nsys.stdout.write('x' * 1000000)\nsys.stdout.flush()\n",
+                    tests=[JudgeTestCase(label='output', input='', expected='')],
+                    time_limit_ms=2500,
+                    memory_limit_mb=64,
+                    max_output_chars=256,
+                ),
+                PythonRuntime(),
+            )
+        )
+
+        self.assertLess(time.perf_counter() - started_at, 2.0)
+        result = report['results'][0]
+        self.assertEqual(result['error_type'], 'output_limit')
+        self.assertLessEqual(len(result['actual']), 260)
+
+    @unittest.skipUnless(os.name == 'posix', 'process-group cleanup is POSIX-specific')
+    def test_shared_engine_kills_background_child_before_returning(self):
+        from shared.judge import JudgeExecutionRequest, JudgeTestCase, async_execute_stdio_submission
+
+        class PythonRuntime:
+            def command_for(self, language: str, script_path: str, memory_limit_mb: int) -> list[str]:  # noqa: ARG002
+                return [sys.executable, '-I', script_path]
+
+            def build_env(self) -> dict[str, str]:
+                return {'PATH': os.environ.get('PATH', ''), 'PYTHONIOENCODING': 'utf-8'}
+
+            def preexec_fn(self, memory_limit_mb: int, time_limit_ms: int, language: str, execution_uid=None):  # noqa: ANN001, ARG002
+                return None
+
+        code = (
+            'import os\n'
+            'import time\n'
+            'if os.fork() == 0:\n'
+            '    time.sleep(8)\n'
+            "os.write(1, b'ok\\n')\n"
+            'os._exit(0)\n'
+        )
+        started_at = time.perf_counter()
+        report = asyncio.run(
+            async_execute_stdio_submission(
+                JudgeExecutionRequest(
+                    language='python',
+                    code=code,
+                    tests=[JudgeTestCase(label='background-child', input='', expected='ok')],
+                    time_limit_ms=1000,
+                    memory_limit_mb=64,
+                    max_output_chars=256,
+                ),
+                PythonRuntime(),
+            )
+        )
+
+        self.assertLess(time.perf_counter() - started_at, 2.0)
+        self.assertTrue(report['passed'])
+
     def test_shared_engine_executes_stdio_tests_concurrently_with_isolated_workdirs(self):
         from shared.judge import JudgeExecutionRequest, JudgeTestCase, async_execute_stdio_submission
 
@@ -222,7 +295,7 @@ class CodeJudgeSecurityTests(unittest.TestCase):
             def build_env(self) -> dict[str, str]:
                 return {'PATH': os.environ.get('PATH', ''), 'PYTHONIOENCODING': 'utf-8'}
 
-            def preexec_fn(self, memory_limit_mb: int, time_limit_ms: int, language: str):  # noqa: ARG002
+            def preexec_fn(self, memory_limit_mb: int, time_limit_ms: int, language: str, execution_uid=None):  # noqa: ANN001, ARG002
                 return None
 
         code = (
@@ -276,6 +349,7 @@ class CodeJudgeSecurityTests(unittest.TestCase):
 
         async def fake_execute(request, runtime):  # noqa: ANN001, ARG001
             captured['max_parallel_tests'] = request.max_parallel_tests
+            captured['execution_uid'] = request.execution_uid
             return {
                 'mode': 'stdin_stdout',
                 'runner': 'stdin_stdout',
@@ -302,6 +376,65 @@ class CodeJudgeSecurityTests(unittest.TestCase):
             )
 
         self.assertEqual(captured['max_parallel_tests'], 3)
+        self.assertIsInstance(captured['execution_uid'], int)
+        self.assertGreater(captured['execution_uid'], 0)
+
+    def test_runner_bootstrap_removes_token_from_exec_environment(self):
+        import judge_runner.app as runner_app
+
+        captured: dict[str, object] = {}
+
+        def fake_execve(executable, args, environment):  # noqa: ANN001
+            captured['environment'] = environment
+            captured['token'] = os.read(
+                int(environment[runner_app._AUTH_TOKEN_FD_ENV]), 4096
+            )
+            raise RuntimeError('stop after inspecting bootstrap')
+
+        with patch.dict(
+            os.environ,
+            {'JUDGE_RUNNER_AUTH_TOKEN': 'bootstrap-secret-token'},
+            clear=True,
+        ), patch.object(runner_app.os, 'execve', side_effect=fake_execve):
+            with self.assertRaisesRegex(RuntimeError, 'bootstrap'):
+                runner_app._bootstrap_auth_token_for_exec()
+
+        environment = captured['environment']
+        self.assertNotIn('JUDGE_RUNNER_AUTH_TOKEN', environment)
+        self.assertEqual(captured['token'], b'bootstrap-secret-token')
+
+    def test_runner_consumes_and_closes_one_shot_token_pipe(self):
+        import judge_runner.app as runner_app
+
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, b'fd-secret-token')
+        finally:
+            os.close(write_fd)
+        with patch.dict(
+            os.environ,
+            {runner_app._AUTH_TOKEN_FD_ENV: str(read_fd)},
+            clear=False,
+        ):
+            self.assertEqual(runner_app._consume_runner_auth_token(), 'fd-secret-token')
+            self.assertNotIn(runner_app._AUTH_TOKEN_FD_ENV, os.environ)
+
+    def test_runner_worker_environment_and_uids_are_isolated_from_dispatcher_state(self):
+        import judge_runner.app as runner_app
+
+        with patch.dict(
+            os.environ,
+            {'JUDGE_RUNNER_AUTH_TOKEN': 'environment-secret-token'},
+            clear=False,
+        ):
+            worker_env = runner_app._build_env()
+
+        self.assertNotIn('JUDGE_RUNNER_AUTH_TOKEN', worker_env)
+        self.assertNotIn(runner_app._AUTH_TOKEN_FD_ENV, worker_env)
+        self.assertNotEqual(
+            runner_app._allocate_execution_uid(),
+            runner_app._allocate_execution_uid(),
+        )
 
 
 if __name__ == '__main__':

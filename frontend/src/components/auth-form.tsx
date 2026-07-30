@@ -242,6 +242,8 @@ export function AuthForm({
 				window.location.href = '/admin/users'
 			} else if (r === 'superadmin') {
 				window.location.href = '/superadmin/users'
+			} else if (r === 'manager') {
+				window.location.href = '/manager/contacts'
 			} else {
 				window.location.href = '/dashboard'
 			}
