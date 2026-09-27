@@ -1,32 +1,44 @@
 'use client'
 
 import { api } from '@/lib/api'
-import type { ModuleItem } from '@/types'
+import type { LessonAuthoringDetail, ModuleItem, PaginationMeta } from '@/types'
 import { SharedLessonBuilder } from './shared-lesson-builder'
+import { buildLessonUpdateData } from './lesson-builder-shared'
 
 interface AdminLessonBuilderProps {
   modules: ModuleItem[]
   onReload?: () => Promise<void> | void
+  editingLesson?: LessonAuthoringDetail | null
+  cancelHref?: string | null
+  lessonListHref?: string | null
+  modulesPagination?: PaginationMeta | null
+  modulesLoading?: boolean
+  onModulesPageChange?: (page: number) => void
 }
 
 interface CreateLessonResponse {
-  lesson: {
-    id: number
-    title: string
-    summary: string
-  }
+  lesson: LessonAuthoringDetail
   roadmap_visible: boolean
   module: ModuleItem
 }
 
-export function AdminLessonBuilder({ modules, onReload }: AdminLessonBuilderProps) {
+export function AdminLessonBuilder({
+  modules,
+  onReload,
+  editingLesson = null,
+  cancelHref = null,
+  lessonListHref = '#lesson-drafts',
+  modulesPagination = null,
+  modulesLoading = false,
+  onModulesPageChange,
+}: AdminLessonBuilderProps) {
   return (
     <SharedLessonBuilder
       mode='admin'
       features={{
         drafts: false,
         sourcePrefill: false,
-        publishToggle: true,
+        publishToggle: false,
         insertPosition: true,
         quiz: true,
         help: false,
@@ -34,8 +46,14 @@ export function AdminLessonBuilder({ modules, onReload }: AdminLessonBuilderProp
       targetConfig={{
         kind: 'module',
         modules,
+        pagination: modulesPagination,
+        loading: modulesLoading,
+        onPageChange: onModulesPageChange,
       }}
-      submitLesson={async ({ target, lesson }) => {
+      cancelHref={cancelHref}
+      editing={editingLesson ? { lesson: editingLesson } : undefined}
+      lessonListHref={lessonListHref}
+      submitLesson={async ({ target, lesson, saveDraft, draftPayload }) => {
         if (target.kind !== 'module') {
           throw new Error('Некорректная цель сохранения урока.')
         }
@@ -47,13 +65,17 @@ export function AdminLessonBuilder({ modules, onReload }: AdminLessonBuilderProp
             body: JSON.stringify({
               title: lesson.title,
               summary: lesson.summary,
+              content_format: lesson.content_format,
+              authoring_metadata: lesson.authoring_metadata,
               theory_text: lesson.theory_text,
               key_points: lesson.key_points,
               interactive_steps: lesson.interactive_steps,
               duration_minutes: lesson.duration_minutes,
               passing_score: lesson.passing_score,
               insert_position: target.insertPosition,
-              publish_module_if_needed: target.publishModuleIfNeeded,
+              // A lesson is created as a draft. Publishing the module must be
+              // an explicit, separate operation.
+              publish_module_if_needed: false,
               task: {
                 enabled: lesson.practice_enabled,
                 task_type: lesson.task_type,
@@ -69,6 +91,8 @@ export function AdminLessonBuilder({ modules, onReload }: AdminLessonBuilderProp
                 memory_limit_mb: lesson.task_type === 'code' ? lesson.memory_limit_mb : null,
               },
               quiz: lesson.quiz,
+              save_draft: saveDraft,
+              ...(draftPayload ? { draft_payload: draftPayload } : {}),
             }),
           },
           'required',
@@ -76,14 +100,59 @@ export function AdminLessonBuilder({ modules, onReload }: AdminLessonBuilderProp
 
         return {
           lesson: data.lesson,
-          successMessage: data.roadmap_visible
-            ? 'Урок создан и уже попадёт в раздел уроков выбранной возрастной группы.'
-            : 'Урок создан, но модуль пока скрыт из раздела уроков. Включите публикацию модуля.',
+          authoringLesson: data.lesson,
+          successMessage: 'Черновик урока сохранён. Ученики его не видят, пока вы не опубликуете урок отдельным действием.',
           nextInsertPosition: String((data.module.lessons?.length || 0) + 1),
         }
       }}
+      updateLesson={async ({ lessonId, version, lesson, saveDraft, draftPayload }) => {
+        const data = await api<{ lesson: LessonAuthoringDetail }>(
+          `/admin/lessons/${lessonId}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({
+              ...buildLessonUpdateData(lesson),
+              version,
+              save_draft: saveDraft,
+              ...(draftPayload ? { draft_payload: draftPayload } : {}),
+            }),
+          },
+          'required',
+        )
+        return data.lesson
+      }}
       onCreated={async () => {
         await onReload?.()
+      }}
+      publishCreatedLesson={async ({ lesson }) => {
+        const data = await api<{ roadmap_visible: boolean }>(
+          `/admin/lessons/${lesson.id}/publish`,
+          {
+            method: 'POST',
+            body: JSON.stringify(
+              typeof lesson.version === 'number' ? { version: lesson.version } : {},
+            ),
+          },
+          'required',
+        )
+        await onReload?.()
+        return data.roadmap_visible
+          ? 'Урок опубликован и доступен ученикам.'
+          : 'Урок опубликован, но модуль пока скрыт от учеников.'
+      }}
+      publishSavedLesson={async ({ lesson }) => {
+        const data = await api<{ lesson: LessonAuthoringDetail; roadmap_visible: boolean }>(
+          `/admin/lessons/${lesson.id}/publish`,
+          { method: 'POST', body: JSON.stringify({ version: lesson.version }) },
+          'required',
+        )
+        await onReload?.()
+        return {
+          lesson: data.lesson,
+          successMessage: data.roadmap_visible
+            ? 'Урок опубликован и доступен ученикам.'
+            : 'Урок опубликован, но модуль пока скрыт от учеников.',
+        }
       }}
     />
   )

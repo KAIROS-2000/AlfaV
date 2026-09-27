@@ -408,9 +408,6 @@ def _legacy_seeded_code_task_updates() -> dict[tuple[str, str], dict]:
 
 
 def seed_modules() -> None:
-    if Module.query.count() > 0:
-        return
-
     from .learning_content import build_learning_modules
 
     modules_data = build_learning_modules(
@@ -423,18 +420,30 @@ def seed_modules() -> None:
     )
 
     for group_index, module_data in enumerate(modules_data, start=1):
-        module = Module(
-            slug=module_data['slug'],
-            title=module_data['title'],
-            description=module_data['description'],
-            age_group=module_data['age_group'],
-            icon=module_data['icon'],
-            color=module_data['color'],
-            order_index=group_index,
-            is_published=True,
-        )
-        db.session.add(module)
-        db.session.flush()
+        module = Module.query.filter_by(slug=module_data['slug']).first()
+        if module is None:
+            module = Module(
+                slug=module_data['slug'],
+                title=module_data['title'],
+                description=module_data['description'],
+                age_group=module_data['age_group'],
+                icon=module_data['icon'],
+                color=module_data['color'],
+                order_index=group_index,
+                is_published=True,
+            )
+            db.session.add(module)
+            db.session.flush()
+        else:
+            # Keep the administrator's publication choice while synchronizing
+            # canonical roadmap metadata and lesson content.
+            module.title = module_data['title']
+            module.description = module_data['description']
+            module.age_group = module_data['age_group']
+            module.icon = module_data['icon']
+            module.color = module_data['color']
+            module.order_index = group_index
+
         for lesson_index, lesson_payload in enumerate(module_data['lessons'], start=1):
             raw_task = lesson_payload['task']
             task_type = 'code' if age_group_supports_code(module.age_group) and raw_task.get('starter_code') else 'text'
@@ -455,22 +464,37 @@ def seed_modules() -> None:
                 task_type=task_type,
                 age_group=module.age_group,
             )
-            lesson = Lesson(
-                module_id=module.id,
-                slug=f"{module.slug}-lesson-{lesson_index}",
-                title=lesson_payload['title'],
-                summary=lesson_payload['summary'],
-                theory_blocks=lesson_payload['theory_blocks'],
-                interactive_steps=lesson_payload['interactive_steps'],
-                order_index=lesson_index,
-                duration_minutes=8 + lesson_index * 2,
-                passing_score=70,
-                content_format='mixed',
-            )
-            db.session.add(lesson)
-            db.session.flush()
-            db.session.add(
-                Task(
+            lesson_slug = f"{module.slug}-lesson-{lesson_index}"
+            lesson = Lesson.query.filter_by(slug=lesson_slug).first()
+            if lesson is None:
+                lesson = Lesson(
+                    module_id=module.id,
+                    slug=lesson_slug,
+                    title=lesson_payload['title'],
+                    summary=lesson_payload['summary'],
+                    theory_blocks=lesson_payload['theory_blocks'],
+                    interactive_steps=lesson_payload['interactive_steps'],
+                    order_index=lesson_index,
+                    duration_minutes=8 + lesson_index * 2,
+                    passing_score=70,
+                    content_format='mixed',
+                )
+                db.session.add(lesson)
+                db.session.flush()
+            else:
+                # Update the lesson in place so progress and assignments keep
+                # pointing at the same Lesson row.
+                lesson.module_id = module.id
+                lesson.title = lesson_payload['title']
+                lesson.summary = lesson_payload['summary']
+                lesson.theory_blocks = lesson_payload['theory_blocks']
+                lesson.interactive_steps = lesson_payload['interactive_steps']
+                lesson.order_index = lesson_index
+                lesson.content_format = 'mixed'
+
+            task = Task.query.filter_by(lesson_id=lesson.id).order_by(Task.id.asc()).first()
+            if task is None:
+                task = Task(
                     lesson_id=lesson.id,
                     task_type=task_type,
                     title=raw_task['title'],
@@ -480,16 +504,28 @@ def seed_modules() -> None:
                     hints=raw_task['hints'],
                     xp_reward=30,
                 )
-            )
-            db.session.add(
-                Quiz(
+                db.session.add(task)
+            else:
+                task.task_type = task_type
+                task.title = raw_task['title']
+                task.prompt = raw_task['prompt']
+                task.starter_code = starter_code
+                task.validation = task_validation
+                task.hints = raw_task['hints']
+
+            quiz = Quiz.query.filter_by(lesson_id=lesson.id).order_by(Quiz.id.asc()).first()
+            if quiz is None:
+                quiz = Quiz(
                     lesson_id=lesson.id,
                     title=f"Мини-тест: {lesson.title}",
                     passing_score=70,
                     questions=lesson_payload['quiz'],
                     xp_reward=50,
                 )
-            )
+                db.session.add(quiz)
+            else:
+                quiz.title = f"Мини-тест: {lesson.title}"
+                quiz.questions = lesson_payload['quiz']
     db.session.commit()
 
 

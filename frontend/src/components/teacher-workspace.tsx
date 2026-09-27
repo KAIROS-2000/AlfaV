@@ -1,6 +1,7 @@
 'use client'
 
 import { UserLocalTime } from '@/components/user-local-time'
+import { clampPageToPagination, FiveItemPager, SERVER_PAGE_SIZE, useFiveItemWindow } from '@/components/five-item-navigator'
 import { api, getApiErrorMessage } from '@/lib/api'
 import { showErrorToast, showSuccessToast } from '@/lib/toast'
 import {
@@ -12,8 +13,12 @@ import {
 	SubmissionItem,
 	TaskEvaluationMode,
 	TeacherClassDetail,
+	TeacherAssignmentsResponse,
 	TeacherJoinRequestsResponse,
+	TeacherLessonCatalogResponse,
 	TeacherOverviewData,
+	TeacherSubmissionsResponse,
+	PaginationMeta,
 } from '@/types'
 import {
 	CalendarClock,
@@ -572,8 +577,6 @@ const AGE_GROUP_LABELS: Record<'junior' | 'middle' | 'senior', string> = {
 	senior: 'Старшая группа',
 }
 
-const LESSONS_PER_PAGE = 4
-
 function splitLines(value: string) {
 	return value
 		.split('\n')
@@ -723,6 +726,8 @@ export function TeacherWorkspace({
 	const [overviewLoading, setOverviewLoading] = useState(!initialOverview)
 	const [overviewError, setOverviewError] = useState<string | null>(null)
 	const [joinRequests, setJoinRequests] = useState<ClassJoinRequestItem[]>([])
+	const [joinRequestsPagination, setJoinRequestsPagination] = useState<PaginationMeta | null>(null)
+	const [joinRequestsPage, setJoinRequestsPage] = useState(1)
 	const [joinRequestsLoading, setJoinRequestsLoading] = useState(false)
 	const [joinRequestsError, setJoinRequestsError] = useState<string | null>(null)
 	const [joinRequestConfirm, setJoinRequestConfirm] = useState<{
@@ -731,21 +736,31 @@ export function TeacherWorkspace({
 	} | null>(null)
 	const [joinRequestSubmitting, setJoinRequestSubmitting] = useState(false)
 	const [catalog, setCatalog] = useState<LessonCatalogItem[]>([])
+	const [catalogPagination, setCatalogPagination] = useState<PaginationMeta | null>(null)
 	const [catalogLoading, setCatalogLoading] = useState(false)
 	const [catalogError, setCatalogError] = useState<string | null>(null)
 	const [selectedClassId, setSelectedClassId] = useState<number | null>(
 		initialOverview?.classes[0]?.id ?? null,
 	)
+	const [selectedClassSnapshot, setSelectedClassSnapshot] = useState<ClassroomItem | null>(initialOverview?.classes[0] ?? null)
+	const [classesPage, setClassesPage] = useState(initialOverview?.classes_pagination?.page ?? 1)
+	const [studentsPage, setStudentsPage] = useState(1)
+	const [assignmentsPage, setAssignmentsPage] = useState(1)
 	const [classDetail, setClassDetail] = useState<TeacherClassDetail | null>(
 		null,
 	)
 	const [classDetailLoading, setClassDetailLoading] = useState(false)
 	const [classDetailError, setClassDetailError] = useState<string | null>(null)
 	const [assignmentRows, setAssignmentRows] = useState<AssignmentItem[]>([])
+	const [assignmentsPagination, setAssignmentsPagination] = useState<PaginationMeta | null>(null)
 	const [selectedAssignmentId, setSelectedAssignmentId] = useState<
 		number | null
 	>(null)
 	const [submissions, setSubmissions] = useState<SubmissionItem[]>([])
+	const [submissionsPagination, setSubmissionsPagination] = useState<PaginationMeta | null>(null)
+	const [submissionsPage, setSubmissionsPage] = useState(1)
+	const [selectedAssignmentSnapshot, setSelectedAssignmentSnapshot] = useState<AssignmentItem | null>(null)
+	const [selectedCatalogLesson, setSelectedCatalogLesson] = useState<LessonCatalogItem | null>(null)
 	const [submissionsLoading, setSubmissionsLoading] = useState(false)
 	const [submissionsError, setSubmissionsError] = useState<string | null>(null)
 	const [feedbackDrafts, setFeedbackDrafts] = useState<Record<number, string>>(
@@ -774,21 +789,24 @@ export function TeacherWorkspace({
 	const catalogRequestRef = useRef(0)
 	const submissionsRequestRef = useRef(0)
 	const selectedClass = useMemo<ClassroomItem | undefined>(
-		() => overview?.classes.find(item => item.id === selectedClassId),
-		[overview, selectedClassId],
+		() => overview?.classes.find(item => item.id === selectedClassId) || selectedClassSnapshot || undefined,
+		[overview, selectedClassId, selectedClassSnapshot],
 	)
 	const selectedAssignment = useMemo(
-		() => assignmentRows.find(item => item.id === selectedAssignmentId) || null,
-		[assignmentRows, selectedAssignmentId],
+		() => assignmentRows.find(item => item.id === selectedAssignmentId) || (selectedAssignmentSnapshot?.id === selectedAssignmentId ? selectedAssignmentSnapshot : null),
+		[assignmentRows, selectedAssignmentId, selectedAssignmentSnapshot],
 	)
+	const classesWindow = useFiveItemWindow({ items: overview?.classes ?? [], pagination: overview?.classes_pagination, loading: overviewLoading, onPageChange: setClassesPage })
+	const requestsWindow = useFiveItemWindow({ items: joinRequests, pagination: joinRequestsPagination, loading: joinRequestsLoading, onPageChange: setJoinRequestsPage })
+	const studentsWindow = useFiveItemWindow({ items: classDetail?.students ?? [], pagination: classDetail?.students_pagination, loading: classDetailLoading, onPageChange: setStudentsPage, resetKey: selectedClassId })
 	const createLessonHref = selectedClassId
 		? `/teacher/lessons/create?classId=${selectedClassId}`
 		: '/teacher/lessons/create'
 	const selectedClassStudentsCount =
-		classDetail?.students.length ?? selectedClass?.students_count ?? 0
+		classDetail?.students_pagination.total ?? selectedClass?.students_count ?? 0
 	const selectedClassAssignmentCount =
-		assignmentRows.length || selectedClass?.assignments_count || 0
-	const uncheckedSubmissionsCount = useMemo(
+		assignmentsPagination?.total ?? selectedClass?.assignments_count ?? 0
+	const pagePendingSubmissions = useMemo(
 		() =>
 			assignmentRows.reduce(
 				(total, assignment) =>
@@ -801,30 +819,20 @@ export function TeacherWorkspace({
 		() => assignmentRows.filter(item => isAssignmentOverdue(item.due_date)),
 		[assignmentRows],
 	)
+	const pageReviewedSubmissions = useMemo(
+		() => assignmentRows.reduce((total, item) => total + (item.checked_count || 0), 0),
+		[assignmentRows],
+	)
+	const hasGlobalAssignmentSummary = Boolean(classDetail?.assignment_summary)
+	const uncheckedSubmissionsCount = classDetail?.assignment_summary?.pending_submissions ?? pagePendingSubmissions
+	const reviewedCount = classDetail?.assignment_summary?.reviewed_submissions ?? pageReviewedSubmissions
+	const overdueAssignmentsCount = classDetail?.assignment_summary?.overdue_assignments ?? overdueAssignmentRows.length
 	const selectedClassRisk = useMemo(
 		() => getPracticeRisk(classDetail?.practice_heatmap),
 		[classDetail?.practice_heatmap],
 	)
-	const filteredLessons = useMemo(() => {
-		const query = lessonSearch.trim().toLowerCase()
-		return catalog.filter(lesson => {
-			const matchesSource =
-				lessonSourceFilter === 'all' || lesson.source === lessonSourceFilter
-			const matchesQuery =
-				!query ||
-				lesson.title.toLowerCase().includes(query) ||
-				lesson.summary.toLowerCase().includes(query) ||
-				(lesson.module_title || '').toLowerCase().includes(query)
-			return matchesSource && matchesQuery
-		})
-	}, [catalog, lessonSearch, lessonSourceFilter])
-	const filteredSubmissions = useMemo(
-		() =>
-			submissions.filter(submission =>
-				submissionMatchesFilter(submission, submissionFilter),
-			),
-		[submissions, submissionFilter],
-	)
+	const filteredLessons = catalog
+	const filteredSubmissions = submissions
 	const reviewAssignmentRows = useMemo(
 		() =>
 			[...assignmentRows].sort((a, b) => {
@@ -843,29 +851,34 @@ export function TeacherWorkspace({
 			}),
 		[assignmentRows],
 	)
+	const assignmentWindow = useFiveItemWindow({ items: reviewAssignmentRows, pagination: assignmentsPagination, loading: classDetailLoading, onPageChange: setAssignmentsPage, resetKey: selectedClassId })
+	const catalogWindow = useFiveItemWindow({ items: filteredLessons, pagination: catalogPagination, loading: catalogLoading, onPageChange: setLessonPage, resetKey: `${selectedClassId}|${lessonSearch}|${lessonSourceFilter}` })
+	const submissionsWindow = useFiveItemWindow({ items: filteredSubmissions, pagination: submissionsPagination, loading: submissionsLoading, onPageChange: setSubmissionsPage, resetKey: `${selectedAssignmentId}|${submissionFilter}` })
 	const attentionCards = useMemo(
 		() => [
 			{
 				key: 'join-requests',
 				title: 'Заявки',
-				count: joinRequests.length,
+				count: joinRequestsPagination?.total ?? joinRequests.length,
 				description: joinRequestsLoading
 					? 'Проверяем новые заявки учеников.'
-					: joinRequests.length
+					: (joinRequestsPagination?.total ?? joinRequests.length)
 						? 'Примите или отклоните заявки, чтобы ученики попали в класс.'
 						: 'Новых заявок нет.',
 				href: '#teacher-classes',
-				action: joinRequests.length ? 'Рассмотреть' : 'Открыть классы',
-				tone: joinRequests.length ? 'sky' : 'slate',
+				action: (joinRequestsPagination?.total ?? joinRequests.length) ? 'Рассмотреть' : 'Открыть классы',
+				tone: (joinRequestsPagination?.total ?? joinRequests.length) ? 'sky' : 'slate',
 			},
 			{
 				key: 'submissions',
-				title: 'Проверка',
+				title: hasGlobalAssignmentSummary ? 'Проверка' : 'Проверка на странице',
 				count: uncheckedSubmissionsCount,
 				description: selectedClass
 					? uncheckedSubmissionsCount
 						? 'Начните с заданий, где больше всего непроверенных ответов.'
-						: 'По выбранному классу нет срочной проверки.'
+						: hasGlobalAssignmentSummary
+							? 'По выбранному классу нет срочной проверки.'
+							: 'На загруженной странице нет срочной проверки.'
 					: 'Выберите класс, чтобы увидеть очередь проверки.',
 				href: '#teacher-review',
 				action: 'Открыть проверку',
@@ -873,22 +886,26 @@ export function TeacherWorkspace({
 			},
 			{
 				key: 'deadlines',
-				title: 'Дедлайны',
-				count: overdueAssignmentRows.length,
+				title: hasGlobalAssignmentSummary ? 'Дедлайны' : 'Дедлайны на странице',
+				count: overdueAssignmentsCount,
 				description: selectedClass
-					? overdueAssignmentRows.length
+					? overdueAssignmentsCount
 						? 'Просмотрите задания с истекшим сроком и ответами учеников.'
-						: 'Просроченных заданий по выбранному классу нет.'
+						: hasGlobalAssignmentSummary
+							? 'Просроченных заданий по выбранному классу нет.'
+							: 'На загруженной странице нет просроченных заданий.'
 					: 'После выбора класса здесь появятся сроки заданий.',
 				href: '#teacher-review',
 				action: 'Посмотреть',
-				tone: overdueAssignmentRows.length ? 'rose' : 'slate',
+				tone: overdueAssignmentsCount ? 'rose' : 'slate',
 			},
 		],
 		[
 			joinRequests.length,
+			joinRequestsPagination?.total,
 			joinRequestsLoading,
-			overdueAssignmentRows.length,
+			hasGlobalAssignmentSummary,
+			overdueAssignmentsCount,
 			selectedClass,
 			uncheckedSubmissionsCount,
 		],
@@ -914,8 +931,8 @@ export function TeacherWorkspace({
 	const selectedLessonForAssignment = useMemo(
 		() =>
 			catalog.find(lesson => String(lesson.id) === assignmentForm.lesson_id) ||
-			null,
-		[catalog, assignmentForm.lesson_id],
+			(selectedCatalogLesson && String(selectedCatalogLesson.id) === assignmentForm.lesson_id ? selectedCatalogLesson : null),
+		[assignmentForm.lesson_id, catalog, selectedCatalogLesson],
 	)
 	const activeLessonBlueprint = LESSON_BLUEPRINTS[lessonBlueprint]
 	const availablePracticeModeOptions = useMemo(
@@ -1034,21 +1051,6 @@ export function TeacherWorkspace({
 		(lessonProgress.filter(item => item.done).length / lessonProgress.length) *
 			100,
 	)
-	const reviewedCount = submissions.filter(item =>
-		REVIEWED_SUBMISSION_STATUSES.has(item.status),
-	).length
-	const totalLessonPages = Math.max(
-		1,
-		Math.ceil(filteredLessons.length / LESSONS_PER_PAGE),
-	)
-	const paginatedLessons = useMemo(
-		() =>
-			filteredLessons.slice(
-				(lessonPage - 1) * LESSONS_PER_PAGE,
-				lessonPage * LESSONS_PER_PAGE,
-			),
-		[filteredLessons, lessonPage],
-	)
 	async function handleCopyClassCode(code: string) {
 		try {
 			await copyToClipboard(code)
@@ -1066,6 +1068,10 @@ export function TeacherWorkspace({
 		submissionsRequestRef.current += 1
 		selectedAssignmentIdRef.current = null
 		setSelectedClassId(nextClassId)
+		setSelectedClassSnapshot(overview?.classes.find(item => item.id === nextClassId) ?? null)
+		setStudentsPage(1)
+		setAssignmentsPage(1)
+		setLessonPage(1)
 		setClassDetail(null)
 		setClassDetailError(null)
 		setClassDetailLoading(Boolean(nextClassId))
@@ -1073,8 +1079,14 @@ export function TeacherWorkspace({
 		setCatalogError(null)
 		setCatalogLoading(Boolean(nextClassId))
 		setAssignmentRows([])
+		setAssignmentsPagination(null)
 		setSelectedAssignmentId(null)
+		setSelectedAssignmentSnapshot(null)
+		setSelectedCatalogLesson(null)
+		setAssignmentForm(current => ({ ...current, lesson_id: '' }))
 		setSubmissions([])
+		setSubmissionsPagination(null)
+		setSubmissionsPage(1)
 		setFeedbackDrafts({})
 		setSubmissionsError(null)
 		setSubmissionsLoading(false)
@@ -1085,6 +1097,8 @@ export function TeacherWorkspace({
 		selectedAssignmentIdRef.current = nextAssignmentId
 		submissionsRequestRef.current += 1
 		setSelectedAssignmentId(nextAssignmentId)
+		setSelectedAssignmentSnapshot(assignmentRows.find(item => item.id === nextAssignmentId) ?? null)
+		setSubmissionsPage(1)
 		setSubmissions([])
 		setFeedbackDrafts({})
 		setSubmissionsError(null)
@@ -1157,22 +1171,10 @@ export function TeacherWorkspace({
 		})
 	}, [lessonPracticeMode])
 
-	useEffect(() => {
-		setLessonPage(current => Math.min(current, totalLessonPages))
-	}, [totalLessonPages])
-
-	function patchAssignmentStats(assignmentId: number, rows: SubmissionItem[]) {
+	function patchAssignmentStats(assignmentId: number, nextAssignment: AssignmentItem) {
 		setAssignmentRows(current =>
 			current.map(assignment =>
-				assignment.id === assignmentId
-					? {
-							...assignment,
-							submissions_count: rows.length,
-							checked_count: rows.filter(item =>
-								REVIEWED_SUBMISSION_STATUSES.has(item.status),
-							).length,
-						}
-					: assignment,
+				assignment.id === assignmentId ? { ...assignment, ...nextAssignment } : assignment,
 			),
 		)
 	}
@@ -1244,6 +1246,7 @@ export function TeacherWorkspace({
 	}
 
 	function selectLessonForAssignment(lesson: LessonCatalogItem) {
+		setSelectedCatalogLesson(lesson)
 		setAssignmentForm(current => ({
 			...current,
 			assignment_type: 'lesson_practice',
@@ -1260,6 +1263,13 @@ export function TeacherWorkspace({
 				current.success_criteria ||
 				ASSIGNMENT_TEMPLATES.lesson_practice.success_criteria,
 		}))
+	}
+
+	function setAssignmentLesson(nextLessonId: string) {
+		setSelectedCatalogLesson(
+			catalog.find(lesson => String(lesson.id) === nextLessonId) ?? null,
+		)
+		setAssignmentForm(current => ({ ...current, lesson_id: nextLessonId }))
 	}
 
 	function applyLessonBlueprint(replaceFilledFields = false) {
@@ -1357,18 +1367,23 @@ export function TeacherWorkspace({
 		})
 	}
 
-	async function loadJoinRequests(options: { silent?: boolean } = {}) {
+	async function loadJoinRequests(options: { silent?: boolean; page?: number } = {}) {
+		const requestedPage = options.page ?? joinRequestsPage
 		if (!options.silent) {
 			setJoinRequestsLoading(true)
 		}
 		setJoinRequestsError(null)
 		try {
 			const data = await api<TeacherJoinRequestsResponse>(
-				'/teacher/join-requests',
+				`/teacher/join-requests?page=${requestedPage}&page_size=${SERVER_PAGE_SIZE}`,
 				undefined,
 				'required',
 			)
 			setJoinRequests(data.requests)
+			setJoinRequestsPagination(data.pagination)
+			const clampedPage = clampPageToPagination(requestedPage, data.pagination)
+			if (clampedPage !== requestedPage) setJoinRequestsPage(clampedPage)
+			return data
 		} catch (error) {
 			const message = getApiErrorMessage(
 				error,
@@ -1385,12 +1400,12 @@ export function TeacherWorkspace({
 		}
 	}
 
-	async function loadOverview() {
+	async function loadOverview(nextPage = classesPage) {
 		setOverviewLoading(true)
 		setOverviewError(null)
 		try {
 			const data = await api<TeacherOverviewData>(
-				'/teacher/overview',
+				`/teacher/overview?page=${nextPage}&page_size=${SERVER_PAGE_SIZE}`,
 				undefined,
 				'required',
 			)
@@ -1410,13 +1425,20 @@ export function TeacherWorkspace({
 		}
 	}
 
-	async function loadCatalog(classroomId: number) {
+	async function loadCatalog(classroomId: number, nextPage = lessonPage) {
 		const requestId = ++catalogRequestRef.current
 		setCatalogLoading(true)
 		setCatalogError(null)
 		try {
-			const data = await api<{ lessons: LessonCatalogItem[] }>(
-				`/teacher/lesson-catalog?classroom_id=${classroomId}`,
+			const params = new URLSearchParams({
+				classroom_id: String(classroomId),
+				page: String(nextPage),
+				page_size: String(SERVER_PAGE_SIZE),
+				source: lessonSourceFilter,
+				q: lessonSearch.trim(),
+			})
+			const data = await api<TeacherLessonCatalogResponse>(
+				`/teacher/lesson-catalog?${params.toString()}`,
 				undefined,
 				'required',
 			)
@@ -1427,6 +1449,7 @@ export function TeacherWorkspace({
 				return
 			}
 			setCatalog(data.lessons)
+			setCatalogPagination(data.pagination)
 		} catch (error) {
 			if (
 				requestId !== catalogRequestRef.current ||
@@ -1450,23 +1473,18 @@ export function TeacherWorkspace({
 		}
 	}
 
-	async function loadClassDetails(classroomId: number) {
+	async function loadClassDetails(classroomId: number, nextStudentsPage = studentsPage, nextAssignmentsPage = assignmentsPage) {
 		const requestId = ++classDetailRequestRef.current
 		setClassDetailLoading(true)
 		setClassDetailError(null)
 		try {
-			const [detail, assignments, nextOverview] = await Promise.all([
+			const [detail, nextOverview] = await Promise.all([
 				api<TeacherClassDetail>(
-					`/teacher/classes/${classroomId}`,
+					`/teacher/classes/${classroomId}?students_page=${nextStudentsPage}&assignments_page=${nextAssignmentsPage}&page_size=${SERVER_PAGE_SIZE}`,
 					undefined,
 					'required',
 				),
-				api<{ assignments: AssignmentItem[] }>(
-					`/teacher/classes/${classroomId}/assignments`,
-					undefined,
-					'required',
-				),
-				api<TeacherOverviewData>('/teacher/overview', undefined, 'required'),
+				api<TeacherOverviewData>(`/teacher/overview?page=${classesPage}&page_size=${SERVER_PAGE_SIZE}`, undefined, 'required'),
 			])
 			if (
 				requestId !== classDetailRequestRef.current ||
@@ -1475,16 +1493,17 @@ export function TeacherWorkspace({
 				return
 			}
 			setClassDetail(detail)
-			setAssignmentRows(assignments.assignments)
+			setAssignmentRows(detail.assignments)
+			setAssignmentsPagination(detail.assignments_pagination)
 			setOverview(nextOverview)
 			setSelectedAssignmentId(current => {
 				const nextAssignmentId = (
-					current &&
-					assignments.assignments.some(item => item.id === current)
+					current
 				)
 					? current
-					: assignments.assignments[0]?.id ?? null
+					: detail.assignments[0]?.id ?? null
 				selectedAssignmentIdRef.current = nextAssignmentId
+				if (!current) setSelectedAssignmentSnapshot(detail.assignments[0] ?? null)
 				return nextAssignmentId
 			})
 		} catch (error) {
@@ -1510,18 +1529,18 @@ export function TeacherWorkspace({
 		}
 	}
 
-	async function loadSubmissions(assignmentId: number) {
+	async function loadSubmissions(assignmentId: number, nextPage = submissionsPage) {
 		const requestId = ++submissionsRequestRef.current
 		setSubmissionsLoading(true)
 		setSubmissionsError(null)
 		try {
 			const [data, nextOverview] = await Promise.all([
-				api<{ assignment: AssignmentItem; submissions: SubmissionItem[] }>(
-					`/teacher/assignments/${assignmentId}/submissions`,
+				api<TeacherSubmissionsResponse>(
+					`/teacher/assignments/${assignmentId}/submissions?page=${nextPage}&page_size=${SERVER_PAGE_SIZE}&status=${submissionFilter}`,
 					undefined,
 					'required',
 				),
-				api<TeacherOverviewData>('/teacher/overview', undefined, 'required'),
+				api<TeacherOverviewData>(`/teacher/overview?page=${classesPage}&page_size=${SERVER_PAGE_SIZE}`, undefined, 'required'),
 			])
 			if (
 				requestId !== submissionsRequestRef.current ||
@@ -1530,14 +1549,18 @@ export function TeacherWorkspace({
 				return
 			}
 			setSubmissions(data.submissions)
+			setSubmissionsPagination(data.pagination)
+			const clampedPage = clampPageToPagination(nextPage, data.pagination)
+			if (clampedPage !== nextPage) setSubmissionsPage(clampedPage)
 			setFeedbackDrafts(
 				data.submissions.reduce<Record<number, string>>((acc, submission) => {
 					acc[submission.id] = submission.feedback || ''
 					return acc
 				}, {}),
 			)
-			patchAssignmentStats(assignmentId, data.submissions)
+			patchAssignmentStats(assignmentId, data.assignment)
 			setOverview(nextOverview)
+			return data
 		} catch (error) {
 			if (
 				requestId !== submissionsRequestRef.current ||
@@ -1593,23 +1616,23 @@ export function TeacherWorkspace({
 	}
 
 	useEffect(() => {
-		if (initialOverview) return
-		loadOverview().catch(() =>
+		if (initialOverview && classesPage === initialOverview.classes_pagination?.page) return
+		loadOverview(classesPage).catch(() =>
 			showErrorToast(
 				'Не удалось загрузить кабинет учителя. Проверьте авторизацию и попробуйте снова.',
 			),
 		)
-	}, [initialOverview])
+	}, [classesPage, initialOverview])
 
 	useEffect(() => {
-		loadJoinRequests().catch(() =>
+		loadJoinRequests({ page: joinRequestsPage }).catch(() =>
 			showErrorToast('Не удалось загрузить заявки на вступление.'),
 		)
 		const intervalId = window.setInterval(() => {
-			loadJoinRequests({ silent: true }).catch(() => undefined)
+			loadJoinRequests({ silent: true, page: joinRequestsPage }).catch(() => undefined)
 		}, 25000)
 		return () => window.clearInterval(intervalId)
-	}, [])
+	}, [joinRequestsPage])
 
 	useEffect(() => {
 		selectedClassIdRef.current = selectedClassId
@@ -1617,27 +1640,36 @@ export function TeacherWorkspace({
 			classDetailRequestRef.current += 1
 			catalogRequestRef.current += 1
 			setCatalog([])
+			setCatalogPagination(null)
 			setCatalogError(null)
 			setCatalogLoading(false)
 			setClassDetail(null)
 			setClassDetailError(null)
 			setClassDetailLoading(false)
 			setAssignmentRows([])
+			setAssignmentsPagination(null)
 			selectAssignment(null)
 			return
 		}
-		Promise.all([
-			loadClassDetails(selectedClassId),
-			loadCatalog(selectedClassId),
-		]).catch(() => {
-			showErrorToast('Не удалось загрузить уроки и задания выбранного класса.')
+		loadClassDetails(selectedClassId, studentsPage, assignmentsPage).catch(() => {
+			showErrorToast('Не удалось загрузить учеников и задания выбранного класса.')
 		})
-	}, [selectedClassId])
+	}, [assignmentsPage, selectedClassId, studentsPage])
+
+	useEffect(() => {
+		if (!selectedClassId) return
+		const timer = window.setTimeout(() => {
+			loadCatalog(selectedClassId, lessonPage).catch(() => {
+				showErrorToast('Не удалось загрузить уроки выбранного класса.')
+			})
+		}, 250)
+		return () => window.clearTimeout(timer)
+	}, [lessonPage, lessonSearch, lessonSourceFilter, selectedClassId])
 
 	useEffect(() => {
 		selectedAssignmentIdRef.current = selectedAssignmentId
 		if (selectedAssignmentId) {
-			loadSubmissions(selectedAssignmentId).catch((error) => {
+			loadSubmissions(selectedAssignmentId, submissionsPage).catch((error) => {
 				setSubmissions([])
 				setFeedbackDrafts({})
 				showErrorToast(
@@ -1651,10 +1683,11 @@ export function TeacherWorkspace({
 		}
 		submissionsRequestRef.current += 1
 		setSubmissions([])
+		setSubmissionsPagination(null)
 		setFeedbackDrafts({})
 		setSubmissionsError(null)
 		setSubmissionsLoading(false)
-	}, [selectedAssignmentId])
+	}, [selectedAssignmentId, submissionFilter, submissionsPage])
 
 	async function createClass(event: FormEvent) {
 		event.preventDefault()
@@ -1818,7 +1851,7 @@ export function TeacherWorkspace({
 						</div>
 						<div className='rounded-2xl bg-slate-50 px-3 py-2'>
 							<p className='text-xs font-bold uppercase tracking-[0.12em] text-slate-400'>
-								Проверка
+								{hasGlobalAssignmentSummary ? 'Проверка' : 'Проверка на странице'}
 							</p>
 							<p className='font-black text-slate-900'>
 								{uncheckedSubmissionsCount}
@@ -1837,6 +1870,13 @@ export function TeacherWorkspace({
 					</div>
 
 					<div className='flex flex-wrap gap-2 xl:justify-end'>
+						<Link
+							href='/teacher/lessons'
+							className='inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-full border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:border-slate-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 sm:flex-none'
+						>
+							<ListChecks className='h-4 w-4' />
+							Черновики и уроки
+						</Link>
 						<Link
 							href={createLessonHref}
 							className='inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-full bg-sky-600 px-4 text-sm font-semibold text-white transition hover:bg-sky-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 sm:flex-none'
@@ -1920,7 +1960,7 @@ export function TeacherWorkspace({
 					</div>
 					<div className='rounded-2xl border border-slate-200 bg-slate-50 p-4'>
 						<p className='text-xs font-bold uppercase tracking-[0.16em] text-slate-500'>
-							Проверено
+							{hasGlobalAssignmentSummary ? 'Проверено' : 'Проверено на странице'}
 						</p>
 						<p className='mt-2 text-3xl font-black text-slate-900'>
 							{reviewedCount}
@@ -2029,8 +2069,8 @@ export function TeacherWorkspace({
 							</p>
 						</div>
 						<span className='rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm'>
-							{joinRequests.length + uncheckedSubmissionsCount + overdueAssignmentRows.length}{' '}
-							в очереди
+							{(joinRequestsPagination?.total ?? joinRequests.length) + uncheckedSubmissionsCount + overdueAssignmentsCount}{' '}
+							{hasGlobalAssignmentSummary ? 'в очереди' : 'в очереди (частично)'}
 						</span>
 					</div>
 
@@ -2185,7 +2225,7 @@ export function TeacherWorkspace({
 									}
 								/>
 							) : overview?.classes.length ? (
-								overview.classes.map(item => (
+								classesWindow.visibleItems.map(item => (
 								<div
 									key={item.id}
 									className={`teacher-workspace__item rounded-2xl border px-4 py-4 ${selectedClassId === item.id ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-800'}`}
@@ -2249,6 +2289,7 @@ export function TeacherWorkspace({
 								/>
 							)}
 						</div>
+						<FiveItemPager window={classesWindow} loading={overviewLoading} itemLabel='классов' className='mt-4' />
 					</div>
 
 					<section className='teacher-workspace__panel codequest-card p-6'>
@@ -2258,8 +2299,8 @@ export function TeacherWorkspace({
 									Заявки на вступление
 								</p>
 								<h2 className='mt-2 break-words text-2xl font-black text-slate-900'>
-									{joinRequests.length
-										? `${joinRequests.length} ожидают решения`
+									{(joinRequestsPagination?.total ?? joinRequests.length)
+										? `${joinRequestsPagination?.total ?? joinRequests.length} ожидают решения`
 										: 'Новых заявок нет'}
 								</h2>
 							</div>
@@ -2301,7 +2342,7 @@ export function TeacherWorkspace({
 									}
 								/>
 							) : joinRequests.length ? (
-								joinRequests.map(joinRequest => (
+								requestsWindow.visibleItems.map(joinRequest => (
 									<div
 										key={joinRequest.id}
 										className='teacher-workspace__item rounded-2xl border border-slate-200 bg-slate-50 p-4'
@@ -2370,6 +2411,7 @@ export function TeacherWorkspace({
 								/>
 							)}
 						</div>
+						<FiveItemPager window={requestsWindow} loading={joinRequestsLoading} itemLabel='заявок' className='mt-4' />
 					</section>
 
 					<section className='teacher-workspace__panel codequest-card p-6'>
@@ -2384,7 +2426,7 @@ export function TeacherWorkspace({
 							</div>
 							{selectedClass && (
 								<span className='rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700'>
-									{classDetail?.students.length || 0} учен.
+									{classDetail?.students_pagination.total ?? 0} учен.
 								</span>
 							)}
 						</div>
@@ -2426,7 +2468,7 @@ export function TeacherWorkspace({
 									description='Выберите класс в списке выше, чтобы увидеть учеников.'
 								/>
 							) : classDetail?.students.length ? (
-								classDetail.students.map(student => (
+								studentsWindow.visibleItems.map(student => (
 									<div
 										key={student.id}
 										className='teacher-workspace__item rounded-2xl border border-slate-200 bg-slate-50 p-4'
@@ -2477,6 +2519,7 @@ export function TeacherWorkspace({
 								/>
 							)}
 						</div>
+						<FiveItemPager window={studentsWindow} loading={classDetailLoading} itemLabel='учеников' className='mt-4' />
 					</section>
 				</section>
 
@@ -2500,10 +2543,7 @@ export function TeacherWorkspace({
 							</div>
 							<div className='flex flex-wrap items-center gap-2'>
 								<span className='rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700'>
-									{filteredLessons.length} из {catalog.length} уроков
-								</span>
-								<span className='rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-600'>
-									Стр. {lessonPage} из {totalLessonPages}
+									{catalogPagination?.total ?? catalog.length} уроков
 								</span>
 							</div>
 						</div>
@@ -2612,7 +2652,7 @@ export function TeacherWorkspace({
 									/>
 								</div>
 							) : (
-								paginatedLessons.map(lesson => (
+								catalogWindow.visibleItems.map(lesson => (
 								<div
 									key={lesson.id}
 									className={`teacher-workspace__item rounded-2xl border p-4 ${lesson.source === 'teacher' ? 'border-emerald-200 bg-emerald-50/60' : 'border-slate-200 bg-slate-50'}`}
@@ -2653,6 +2693,14 @@ export function TeacherWorkspace({
 										>
 											Взять за основу
 										</Link>
+										{lesson.source === 'teacher' ? (
+											<Link
+												href={`/teacher/lessons/${lesson.id}/edit`}
+												className='rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-700'
+											>
+												Редактировать
+											</Link>
+										) : null}
 										<Link
 											href={`/lessons/${lesson.id}`}
 											className='rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-700'
@@ -2665,37 +2713,7 @@ export function TeacherWorkspace({
 							)}
 						</div>
 
-						{totalLessonPages > 1 && (
-							<div className='mt-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3'>
-								<p className='text-sm text-slate-600'>
-									Показываем по {LESSONS_PER_PAGE} урока на страницу.
-								</p>
-								<div className='flex flex-wrap gap-2'>
-									<button
-										type='button'
-										onClick={() =>
-											setLessonPage(current => Math.max(1, current - 1))
-										}
-										disabled={lessonPage === 1}
-										className='rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50'
-									>
-										Назад
-									</button>
-									<button
-										type='button'
-										onClick={() =>
-											setLessonPage(current =>
-												Math.min(totalLessonPages, current + 1),
-											)
-										}
-										disabled={lessonPage === totalLessonPages}
-										className='rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50'
-									>
-										Вперёд
-									</button>
-								</div>
-							</div>
-						)}
+						<FiveItemPager window={catalogWindow} loading={catalogLoading} itemLabel='уроков' className='mt-5 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3' />
 					</section>
 					<form
 						id='teacher-assignments'
@@ -2786,15 +2804,13 @@ export function TeacherWorkspace({
 									aria-invalid={missingAssignmentFields.includes('lesson_id')}
 									className={`mt-2 w-full rounded-2xl border px-4 py-3 ${missingAssignmentFields.includes('lesson_id') ? 'border-rose-300 bg-rose-50' : 'border-slate-200'}`}
 									value={assignmentForm.lesson_id}
-									onChange={e =>
-										setAssignmentForm({
-											...assignmentForm,
-											lesson_id: e.target.value,
-										})
-									}
+									onChange={e => setAssignmentLesson(e.target.value)}
 								>
 									<option value=''>Выберите урок для задания</option>
-									{catalog.map(lesson => (
+									{selectedLessonForAssignment && !catalogWindow.visibleItems.some(lesson => lesson.id === selectedLessonForAssignment.id) ? (
+										<option value={selectedLessonForAssignment.id}>[{selectedLessonForAssignment.source === 'teacher' ? 'Ваш урок' : 'Каталог'}] {selectedLessonForAssignment.title}</option>
+									) : null}
+									{catalogWindow.visibleItems.map(lesson => (
 										<option key={lesson.id} value={lesson.id}>
 											[{lesson.source === 'teacher' ? 'Ваш урок' : 'Каталог'}]{' '}
 											{lesson.title}
@@ -3084,7 +3100,7 @@ export function TeacherWorkspace({
 									</h3>
 								</div>
 								<span className='rounded-full bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-800'>
-									{uncheckedSubmissionsCount} ответов ждут
+									{uncheckedSubmissionsCount} ответов ждут{hasGlobalAssignmentSummary ? '' : ' на странице'}
 								</span>
 							</div>
 							<p className='mt-3 text-sm leading-6 text-slate-600'>
@@ -3147,7 +3163,7 @@ export function TeacherWorkspace({
 										}
 									/>
 								) : (
-									reviewAssignmentRows.map(assignment => {
+									assignmentWindow.visibleItems.map(assignment => {
 										const pendingCount = getAssignmentPendingCount(assignment)
 										const overdue = isAssignmentOverdue(assignment.due_date)
 										return (
@@ -3186,7 +3202,7 @@ export function TeacherWorkspace({
 															</span>
 														) : (
 															<span className='rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700'>
-																Проверено
+							Проверено в списке
 															</span>
 														)}
 														<span className='rounded-full bg-white px-3 py-1.5 text-xs font-bold text-slate-700'>
@@ -3214,6 +3230,7 @@ export function TeacherWorkspace({
 									})
 								)}
 							</div>
+							<FiveItemPager window={assignmentWindow} loading={classDetailLoading} itemLabel='заданий' className='mt-4' />
 						</div>
 
 						<div className='teacher-workspace__panel codequest-card min-w-0 p-6 sm:p-7'>
@@ -3231,7 +3248,7 @@ export function TeacherWorkspace({
 								</div>
 								{selectedAssignment ? (
 									<span className='rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700'>
-										{submissions.length} сдач
+									{submissionsPagination?.total ?? submissions.length} сдач
 									</span>
 								) : null}
 							</div>
@@ -3292,7 +3309,7 @@ export function TeacherWorkspace({
 									<button
 										key={filter.value}
 										type='button'
-										onClick={() => setSubmissionFilter(filter.value)}
+										onClick={() => { setSubmissionFilter(filter.value); setSubmissionsPage(1) }}
 										className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
 											submissionFilter === filter.value
 												? 'bg-slate-900 text-white'
@@ -3350,7 +3367,7 @@ export function TeacherWorkspace({
 										className='min-h-[10rem]'
 									/>
 								) : (
-									filteredSubmissions.map(submission => (
+									submissionsWindow.visibleItems.map(submission => (
 										<div
 											key={submission.id}
 											className='teacher-workspace__item rounded-2xl border border-slate-200 bg-slate-50 p-5 sm:p-6'
@@ -3461,6 +3478,7 @@ export function TeacherWorkspace({
 									))
 								)}
 							</div>
+							<FiveItemPager window={submissionsWindow} loading={submissionsLoading} itemLabel='сдач' className='mt-4' />
 						</div>
 					</section>
 			</section>

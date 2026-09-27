@@ -229,7 +229,7 @@ class CriticalJourneyTests(unittest.TestCase):
         self.create_student(app)
         lesson_id, _ = self.create_code_lesson(app)
 
-        with app.test_client() as client, patch('app.core.gigachat.request_lesson_chat_completion') as completion:
+        with app.test_client() as client:
             self.login(client)
             response = client.post(
                 f'/api/lessons/{lesson_id}/gigachat',
@@ -238,7 +238,6 @@ class CriticalJourneyTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.get_json()['message'], 'GigaChat недоступен в проекте.')
-        completion.assert_not_called()
 
     def test_teacher_assignment_submission_and_grading_journey(self):
         app = self.create_app()

@@ -41,10 +41,12 @@ class SecurityRegressionTests(unittest.TestCase):
         self._tempdirs.append(tempdir)
         database_path = Path(tempdir.name) / 'test.db'
         env = {
+            'CODEQUEST_SKIP_DOTENV': 'true',
             'APP_ENV': 'development',
             'SECRET_KEY': 'UnitTestSecretKey123!UnitTestSecretKey123!',
             'DATABASE_URL': f'sqlite:///{database_path.as_posix()}',
             'CLIENT_URL': 'http://localhost:3000',
+            'LEGAL_DOCUMENTS_VERSION': 'test-legal-v1',
             'ENABLE_DEMO_DATA': 'false',
             'SUPERADMIN_BOOTSTRAP': 'false',
             'SESSION_COOKIE_SECURE': 'false',
@@ -53,10 +55,20 @@ class SecurityRegressionTests(unittest.TestCase):
             'CODE_JUDGE_RUNNER_URL': '',
             'CODE_JUDGE_RUNNER_TOKEN': '',
             'METRICS_DEBUG': 'false',
+            'SEND_MAIL': 'false',
+            'REDIS_URL': '',
+            'REDIS_PASSWORD': '',
+            'REDIS_PASSWORD_FILE': '',
+            'POSTGRES_PASSWORD_FILE': '',
+            'CODE_JUDGE_RUNNER_TOKEN_FILE': '',
+            'READINESS_REQUIRE_REDIS': 'false',
+            'READINESS_REQUIRE_JUDGE': 'false',
+            'ENABLE_AUDIT_LOG_DAILY_EXPORT_THREAD': 'false',
+            'ENABLE_PARENT_WEEKLY_PROGRESS_EMAIL_THREAD': 'false',
         }
         env.update(env_overrides)
 
-        with patch.dict(os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=True):
             import app.core.config as config_module
             import app as app_module
 
@@ -271,6 +283,10 @@ class SecurityRegressionTests(unittest.TestCase):
                     'phone': '123',
                     'role': 'student',
                     'age_group': 'middle',
+                    'privacy_accepted': True,
+                    'terms_accepted': True,
+                    'personal_data_accepted': True,
+                    'legal_documents_version': 'test-legal-v1',
                 },
             )
             self.assertEqual(response.status_code, 400)
@@ -288,6 +304,10 @@ class SecurityRegressionTests(unittest.TestCase):
                     'phone': '+7 (912) 345-67-89',
                     'role': 'student',
                     'age_group': 'middle',
+                    'privacy_accepted': True,
+                    'terms_accepted': True,
+                    'personal_data_accepted': True,
+                    'legal_documents_version': 'test-legal-v1',
                 },
             )
             self.assertEqual(response.status_code, 201)
@@ -305,6 +325,10 @@ class SecurityRegressionTests(unittest.TestCase):
                     'phone': '+7 (912) 345-67-89',
                     'role': 'student',
                     'age_group': 'middle',
+                    'privacy_accepted': True,
+                    'terms_accepted': True,
+                    'personal_data_accepted': True,
+                    'legal_documents_version': 'test-legal-v1',
                 },
             )
             self.assertEqual(response.status_code, 201, response.get_json())
@@ -327,6 +351,10 @@ class SecurityRegressionTests(unittest.TestCase):
                         'phone': '123',
                         'role': 'student',
                         'age_group': 'middle',
+                        'privacy_accepted': True,
+                        'terms_accepted': True,
+                        'personal_data_accepted': True,
+                        'legal_documents_version': 'test-legal-v1',
                     },
                 )
                 self.assertEqual(response.status_code, 400)
@@ -339,6 +367,10 @@ class SecurityRegressionTests(unittest.TestCase):
                     'phone': '123',
                     'role': 'student',
                     'age_group': 'middle',
+                    'privacy_accepted': True,
+                    'terms_accepted': True,
+                    'personal_data_accepted': True,
+                    'legal_documents_version': 'test-legal-v1',
                 },
             )
             self.assertEqual(blocked.status_code, 429)
@@ -354,6 +386,10 @@ class SecurityRegressionTests(unittest.TestCase):
                     'password': 'StrongPass123!',
                     'role': 'student',
                     'age_group': 'middle',
+                    'privacy_accepted': True,
+                    'terms_accepted': True,
+                    'personal_data_accepted': True,
+                    'legal_documents_version': 'test-legal-v1',
                 },
             )
             self.assertEqual(response.status_code, 400)
@@ -375,6 +411,7 @@ class SecurityRegressionTests(unittest.TestCase):
         app = self.create_app(
             APP_ENV='production',
             SESSION_COOKIE_SECURE='true',
+            CLIENT_URL='https://frontend.example',
             SUPERADMIN_BOOTSTRAP='false',
             GIGACHAT_VERIFY_SSL='true',
             CODE_JUDGE_ALLOW_LOCAL_FALLBACK='true',
@@ -383,7 +420,7 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertFalse(app.config['CODE_JUDGE_ALLOW_LOCAL_FALLBACK'])
 
         with app.test_client() as client:
-            response = client.get('/api/health')
+            response = client.get('/api/live')
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers.get('X-Content-Type-Options'), 'nosniff')
             self.assertEqual(response.headers.get('X-Frame-Options'), 'DENY')
@@ -396,6 +433,7 @@ class SecurityRegressionTests(unittest.TestCase):
         app = self.create_app(
             APP_ENV='production',
             SESSION_COOKIE_SECURE='true',
+            CLIENT_URL='https://frontend.example',
             SUPERADMIN_BOOTSTRAP='false',
             GIGACHAT_VERIFY_SSL='true',
             **_PROD_REDIS_ENV,

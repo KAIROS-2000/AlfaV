@@ -1,7 +1,17 @@
 import { cookies } from 'next/headers'
+import { redirect } from 'next/navigation'
 
 import type { LessonPlayerPayload } from '@/components/lesson-player-helpers'
-import { INTERNAL_API_URL } from '@/lib/server-env'
+import { getInternalApiUrl } from '@/lib/server-env'
+import {
+  DEFAULT_SERVER_REQUEST_TIMEOUT_MS,
+  UPLOAD_BROWSER_REQUEST_TIMEOUT_MS,
+  withRequestTimeout,
+} from '@/lib/request-timeout'
+import {
+  redirectForServerStatus,
+  ServerApiResponseError,
+} from '@/lib/server-response-policy'
 
 const FORWARDED_COOKIE_NAMES = [
   'codequest_access_token',
@@ -21,10 +31,27 @@ function extractMessage(payload: unknown) {
   return typeof payload.message === 'string' ? payload.message : null
 }
 
+function enforceRouteResponse(response: Response, payload: unknown): asserts response is Response {
+  if (response.ok) return
+  const destination = redirectForServerStatus(response.status)
+  if (destination) redirect(destination)
+  throw new ServerApiResponseError(
+    response.status,
+    extractMessage(payload) || `Server request failed with status ${response.status}`,
+    payload,
+  )
+}
+
+function serverRequestTimeoutMs(init?: RequestInit) {
+  return typeof FormData !== 'undefined' && init?.body instanceof FormData
+    ? UPLOAD_BROWSER_REQUEST_TIMEOUT_MS
+    : DEFAULT_SERVER_REQUEST_TIMEOUT_MS
+}
+
 /**
  * Первичная загрузка урока: при 404 с бэкенда — сигнал для notFound() (без HTML в React).
  */
-export async function fetchLessonPlayerInitial(lessonId: string): Promise<LessonPlayerPayload | 'not_found' | null> {
+export async function fetchLessonPlayerInitial(lessonId: string): Promise<LessonPlayerPayload | 'not_found'> {
   const cookieStore = await cookies()
   const cookieHeader = FORWARDED_COOKIE_NAMES.map((name) => {
     const value = cookieStore.get(name)?.value
@@ -34,26 +61,32 @@ export async function fetchLessonPlayerInitial(lessonId: string): Promise<Lesson
     .join('; ')
 
   const path = normalizePath(`/lessons/${encodeURIComponent(lessonId)}`)
-  const response = await fetch(`${INTERNAL_API_URL}${path}`, {
-    method: 'GET',
-    headers: {
-      accept: 'application/json',
-      ...(cookieHeader ? { cookie: cookieHeader } : {}),
-    },
-    cache: 'no-store',
-  })
-  const text = await response.text()
+  const { response, text } = await withRequestTimeout(async signal => {
+    const response = await fetch(`${getInternalApiUrl()}${path}`, {
+      method: 'GET',
+      headers: {
+        accept: 'application/json',
+        ...(cookieHeader ? { cookie: cookieHeader } : {}),
+      },
+      cache: 'no-store',
+      signal,
+    })
+    return { response, text: await response.text() }
+  }, DEFAULT_SERVER_REQUEST_TIMEOUT_MS)
   if (response.status === 404) {
     return 'not_found'
   }
-  if (!response.ok) {
-    return null
-  }
+  let payload: unknown = null
   try {
-    return JSON.parse(text) as LessonPlayerPayload
+    payload = text ? JSON.parse(text) as unknown : null
   } catch {
-    return null
+    payload = null
   }
+  enforceRouteResponse(response, payload)
+  if (!payload || typeof payload !== 'object') {
+    throw new ServerApiResponseError(response.status, 'Lesson response was not valid JSON', payload)
+  }
+  return payload as LessonPlayerPayload
 }
 
 export async function serverApi<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -69,18 +102,20 @@ export async function serverApi<T>(path: string, init: RequestInit = {}): Promis
   const csrf = cookieStore.get('csrf_token')?.value?.trim()
   const needsCsrfHeader = !['GET', 'HEAD', 'OPTIONS'].includes(method)
 
-  const response = await fetch(`${INTERNAL_API_URL}${normalizePath(path)}`, {
-    ...init,
-    headers: {
-      accept: 'application/json',
-      ...(init.headers || {}),
-      ...(cookieHeader ? { cookie: cookieHeader } : {}),
-      ...(needsCsrfHeader && csrf ? { [CSRF_HEADER]: csrf } : {}),
-    },
-    cache: 'no-store',
-  })
-
-  const text = await response.text()
+  const { response, text } = await withRequestTimeout(async signal => {
+    const response = await fetch(`${getInternalApiUrl()}${normalizePath(path)}`, {
+      ...init,
+      headers: {
+        accept: 'application/json',
+        ...(init.headers || {}),
+        ...(cookieHeader ? { cookie: cookieHeader } : {}),
+        ...(needsCsrfHeader && csrf ? { [CSRF_HEADER]: csrf } : {}),
+      },
+      cache: 'no-store',
+      signal,
+    })
+    return { response, text: await response.text() }
+  }, serverRequestTimeoutMs(init), init.signal)
   let payload: unknown = null
   if (text) {
     try {
@@ -89,8 +124,6 @@ export async function serverApi<T>(path: string, init: RequestInit = {}): Promis
       payload = null
     }
   }
-  if (!response.ok) {
-    throw new Error(extractMessage(payload) || 'Server request failed')
-  }
+  enforceRouteResponse(response, payload)
   return payload as T
 }

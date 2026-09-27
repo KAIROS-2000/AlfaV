@@ -13,16 +13,13 @@ from ..core.security import (
     parent_link_redeem_allowed,
     register_parent_link_redeem_failure,
 )
-from ..models.learning import ClassMembership, UserAchievement
+from ..models.learning import UserAchievement
 from ..models.parent_cabinet import (
     ParentChildLink,
     ParentConsentSettings,
     ParentLinkCode,
     ParentNotification,
     ParentSafetySettings,
-    ParentTeacherMessage,
-    ParentTeacherReadState,
-    ParentTeacherThread,
 )
 from ..models.user import User, UserRole
 from ..services import parent_event_notifications
@@ -50,7 +47,7 @@ def _child_user_for_parent(parent: User, child_id: int) -> tuple[User | None, tu
     link = _link_active(parent.id, child_id)
     if not link:
         return None, ({"message": "Нет доступа к этому ребёнку."}, 403)
-    child = User.query.get(child_id)
+    child = db.session.get(User, child_id)
     if not child or child.role != UserRole.STUDENT or not child.is_active:
         return None, ({"message": "Ребёнок недоступен."}, 404)
     return child, None
@@ -132,7 +129,7 @@ def parent_dashboard(user: User):
     )
     children: list[dict] = []
     for link in links:
-        child = User.query.get(link.child_user_id)
+        child = db.session.get(User, link.child_user_id)
         if not child:
             continue
         children.append(
@@ -165,7 +162,7 @@ def list_children(user: User):
     )
     rows = []
     for link in links:
-        child = User.query.get(link.child_user_id)
+        child = db.session.get(User, link.child_user_id)
         if not child:
             continue
         rows.append(
@@ -270,7 +267,7 @@ def link_child(user: User):
         register_parent_link_redeem_failure(user.id)
         db.session.commit()
         return {"message": "Код недействителен или срок его действия истёк."}, 400
-    child = User.query.get(row.child_user_id)
+    child = db.session.get(User, row.child_user_id)
     if not child or child.role != UserRole.STUDENT:
         register_parent_link_redeem_failure(user.id)
         db.session.commit()

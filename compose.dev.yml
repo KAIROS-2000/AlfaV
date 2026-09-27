@@ -1,0 +1,68 @@
+services:
+  db:
+    build:
+      context: ./postgres
+      dockerfile: Dockerfile
+    image: ${POSTGRES_IMAGE:-progyx/postgres:${PROGYX_IMAGE_TAG:-local}}
+  volume-init:
+    build: &backend-build
+      context: .
+      dockerfile: backend/Dockerfile
+    image: ${BACKEND_IMAGE:-progyx/backend:${PROGYX_IMAGE_TAG:-local}}
+    volumes:
+      - ./media:/media
+      - ./backend/logs/audit:/app/backend/logs/audit
+  backend:
+    build: *backend-build
+    image: ${BACKEND_IMAGE:-progyx/backend:${PROGYX_IMAGE_TAG:-local}}
+    environment:
+      APP_ENV: development
+      FLASK_DEBUG: "1"
+    command: ["python", "-m", "flask", "--app", "run.py", "run", "--host=0.0.0.0", "--port=8000", "--debug"]
+    volumes:
+      - ./backend/app:/app/backend/app
+      - ./backend/run.py:/app/backend/run.py:ro
+      - ./shared:/app/shared:ro
+      - ./media:/media
+      - ./backend/logs/audit:/app/backend/logs/audit
+    ports: ["127.0.0.1:8000:8000"]
+  backend-init:
+    image: ${BACKEND_IMAGE:-progyx/backend:${PROGYX_IMAGE_TAG:-local}}
+    volumes:
+      - ./backend/app:/app/backend/app
+      - ./backend/run.py:/app/backend/run.py:ro
+      - ./shared:/app/shared:ro
+      - ./media:/media
+      - ./backend/logs/audit:/app/backend/logs/audit
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: builder
+    # The dev target is the intermediate builder image. Keep its tag separate
+    # from the production runner image used by compose.yml.
+    image: ${FRONTEND_DEV_IMAGE:-progyx/frontend-dev:${PROGYX_IMAGE_TAG:-local}}
+    environment:
+      APP_ENV: development
+      NODE_ENV: development
+      INTERNAL_API_URL: http://backend:8000/api
+    command: ["/bin/sh", "-c", "test -x node_modules/.bin/next || npm ci --no-audit --no-fund; npm run dev"]
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+      - frontend_next:/app/.next
+    ports: ["127.0.0.1:3000:3000"]
+  judge-runner:
+    build:
+      context: .
+      dockerfile: judge_runner/Dockerfile
+  judge-gateway:
+    build:
+      context: ./caddy
+      dockerfile: Dockerfile
+    image: ${CADDY_IMAGE:-progyx/caddy:${PROGYX_IMAGE_TAG:-local}}
+  db-backup:
+    profiles: [backup]
+volumes:
+  frontend_node_modules:
+  frontend_next:

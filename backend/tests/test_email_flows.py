@@ -102,10 +102,12 @@ class EmailFlowsTests(unittest.TestCase):
         self._tempdirs.append(tempdir)
         database_path = Path(tempdir.name) / 'email-test.db'
         env = {
+            'CODEQUEST_SKIP_DOTENV': 'true',
             'APP_ENV': 'development',
             'SECRET_KEY': 'UnitTestSecretKey123!UnitTestSecretKey123!',
             'DATABASE_URL': f'sqlite:///{database_path.as_posix()}',
             'CLIENT_URL': 'http://localhost:3000',
+            'LEGAL_DOCUMENTS_VERSION': 'test-legal-v1',
             'FRONTEND_PUBLIC_URL': 'http://localhost:3000',
             'EMAIL_FROM': 'no-reply@progyx.test',
             'EMAIL_FROM_NAME': 'Progyx Test',
@@ -121,10 +123,18 @@ class EmailFlowsTests(unittest.TestCase):
             'CODE_JUDGE_RUNNER_TOKEN': '',
             'METRICS_DEBUG': 'false',
             'THROTTLE_BACKEND': 'db',
+            'REDIS_URL': '',
+            'REDIS_PASSWORD': '',
+            'REDIS_PASSWORD_FILE': '',
+            'POSTGRES_PASSWORD_FILE': '',
+            'CODE_JUDGE_RUNNER_TOKEN_FILE': '',
+            'READINESS_REQUIRE_REDIS': 'false',
+            'ENABLE_AUDIT_LOG_DAILY_EXPORT_THREAD': 'false',
+            'ENABLE_PARENT_WEEKLY_PROGRESS_EMAIL_THREAD': 'false',
         }
         env.update(env_overrides)
 
-        with patch.dict(os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=True):
             import app.core.config as config_module
             import app as app_module
 
@@ -164,6 +174,10 @@ class EmailFlowsTests(unittest.TestCase):
                 'password': 'StrongPass123!',
                 'role': 'student',
                 'age_group': 'middle',
+                'privacy_accepted': True,
+                'terms_accepted': True,
+                'personal_data_accepted': True,
+                'legal_documents_version': 'test-legal-v1',
             },
         )
 
@@ -663,6 +677,10 @@ class EmailFlowsTests(unittest.TestCase):
                 'password': 'StrongPass123!',
                 'role': 'student',
                 'age_group': 'middle',
+                'privacy_accepted': True,
+                'terms_accepted': True,
+                'personal_data_accepted': True,
+                'legal_documents_version': 'test-legal-v1',
             },
         )
         self.assertEqual(resp.status_code, 201, resp.get_json())
@@ -673,22 +691,202 @@ class EmailFlowsTests(unittest.TestCase):
         self.assertTrue(any('codequest_access_token=' in c for c in cookies), cookies)
         self.assertEqual(len(self._mailer.calls), 0)
 
-    def test_register_parent_send_mail_false_returns_initial_password(self):
+    def test_register_parent_uses_single_use_password_setup_link(self):
+        app = self.create_app(SEND_MAIL='true')
+        client = app.test_client()
+        self._mailer.calls.clear()
+        response = client.post(
+            '/api/auth/register',
+            json={
+                'email': 'setup-parent@example.com',
+                'role': 'parent',
+                'theme': 'light',
+                'privacy_accepted': True,
+                'terms_accepted': True,
+                'personal_data_accepted': True,
+                'legal_documents_version': 'test-legal-v1',
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.get_json())
+        body = response.get_json()
+        self.assertTrue(body['requires_password_setup'])
+        self.assertTrue(body['password_setup_email_sent'])
+        self.assertNotIn('initial_password', body)
+        self.assertFalse(any(
+            'codequest_access_token=' in cookie
+            for cookie in response.headers.getlist('Set-Cookie')
+        ))
+        self.assertEqual(len(self._mailer.calls), 1)
+        email_html = self._mailer.calls[0]['html']
+        self.assertIn('/reset-password?token=', email_html)
+        self.assertNotIn('Временный пароль', email_html)
+        raw_token = _extract_token_from_html(email_html)
+
+        with app.app_context():
+            from app.models.user import (
+                EMAIL_TOKEN_PURPOSE_PARENT_PASSWORD_SETUP,
+                EmailToken,
+                User,
+            )
+
+            parent = User.query.filter_by(email='setup-parent@example.com').one()
+            self.assertFalse(parent.is_active)
+            self.assertFalse(parent.email_verified)
+            self.assertEqual(
+                EmailToken.query.filter_by(user_id=parent.id).one().purpose,
+                EMAIL_TOKEN_PURPOSE_PARENT_PASSWORD_SETUP,
+            )
+
+        completed = client.post(
+            '/api/auth/reset-password',
+            json={'token': raw_token, 'new_password': 'ParentChosenPass123!'},
+        )
+        self.assertEqual(completed.status_code, 200, completed.get_json())
+        self.assertTrue(completed.get_json()['password_setup_completed'])
+        reused = client.post(
+            '/api/auth/reset-password',
+            json={'token': raw_token, 'new_password': 'AnotherStrongPass123!'},
+        )
+        self.assertEqual(reused.status_code, 400)
+        self.assertEqual(reused.get_json()['code'], 'used_token')
+        login = client.post(
+            '/api/auth/login',
+            json={'login': 'setup-parent@example.com', 'password': 'ParentChosenPass123!'},
+        )
+        self.assertEqual(login.status_code, 200, login.get_json())
+
+    def test_parent_registration_rolls_back_when_setup_email_delivery_fails(self):
+        app = self.create_app(SEND_MAIL='true')
+        from app.services.email_service import EmailDeliveryError
+
+        with patch(
+            'app.api.auth.send_parent_welcome_email',
+            side_effect=EmailDeliveryError('provider down'),
+        ):
+            with app.test_client() as client:
+                response = client.post(
+                    '/api/auth/register',
+                    json={
+                        'email': 'undelivered-parent@example.com',
+                        'role': 'parent',
+                        'privacy_accepted': True,
+                        'terms_accepted': True,
+                        'personal_data_accepted': True,
+                        'legal_documents_version': 'test-legal-v1',
+                    },
+                )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()['code'], 'parent_setup_delivery_failed')
+        self.assertFalse(any(
+            'codequest_access_token=' in cookie
+            for cookie in response.headers.getlist('Set-Cookie')
+        ))
+        with app.app_context():
+            from app.models.user import User
+
+            self.assertIsNone(User.query.filter_by(email='undelivered-parent@example.com').first())
+
+    def test_register_parent_send_mail_false_requires_caller_password(self):
         app = self.create_app(SEND_MAIL='false')
         client = app.test_client()
         self._mailer.calls.clear()
         resp = client.post(
             '/api/auth/register',
-            json={'email': 'quick-parent@example.com', 'role': 'parent', 'theme': 'light'},
+            json={
+                'email': 'quick-parent@example.com',
+                'password': 'ParentChosenPass123!',
+                'role': 'parent',
+                'theme': 'light',
+                'privacy_accepted': True,
+                'terms_accepted': True,
+                'personal_data_accepted': True,
+                'legal_documents_version': 'test-legal-v1',
+            },
         )
         self.assertEqual(resp.status_code, 201, resp.get_json())
         body = resp.get_json()
         self.assertTrue(body['user']['email_verified'])
         self.assertFalse(body.get('requires_email_verification', True))
-        self.assertIn('initial_password', body)
-        self.assertEqual(len(body['initial_password']), 14)
+        self.assertNotIn('initial_password', body)
+        self.assertFalse(body['requires_password_setup'])
         self.assertNotIn('email_verified', body['parent_profile_required_fields'])
         self.assertEqual(len(self._mailer.calls), 0)
+
+    def test_registration_requires_matching_legal_acknowledgement(self):
+        app = self.create_app(SEND_MAIL='false')
+        with app.test_client() as client:
+            missing = client.post(
+                '/api/auth/register',
+                json={
+                    'email': 'legal-missing@example.com',
+                    'phone': '+7 (912) 345-67-91',
+                    'password': 'StrongPass123!',
+                    'role': 'student',
+                    'age_group': 'middle',
+                },
+            )
+            mismatch = client.post(
+                '/api/auth/register',
+                json={
+                    'email': 'legal-mismatch@example.com',
+                    'phone': '+7 (912) 345-67-92',
+                    'password': 'StrongPass123!',
+                    'role': 'student',
+                    'age_group': 'middle',
+                    'privacy_accepted': True,
+                    'terms_accepted': True,
+                    'personal_data_accepted': True,
+                    'legal_documents_version': 'stale-v1',
+                },
+            )
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(missing.get_json()['code'], 'legal_consent_required')
+        self.assertEqual(mismatch.status_code, 400)
+        self.assertEqual(mismatch.get_json()['code'], 'legal_version_mismatch')
+
+    def test_registration_requires_personal_data_consent_to_be_literal_true(self):
+        app = self.create_app(SEND_MAIL='false')
+        supplied_values = (False, 'true', 1, None)
+        with app.test_client() as client:
+            for index, supplied_value in enumerate(supplied_values):
+                with self.subTest(personal_data_accepted=supplied_value):
+                    response = client.post(
+                        '/api/auth/register',
+                        json={
+                            'full_name': f'Consent Rejected {index}',
+                            'email': f'personal-consent-{index}@example.com',
+                            'phone': f'+7 (912) 345-68-{index:02d}',
+                            'password': 'StrongPass123!',
+                            'role': 'student',
+                            'age_group': 'middle',
+                            'privacy_accepted': True,
+                            'terms_accepted': True,
+                            'personal_data_accepted': supplied_value,
+                            'legal_documents_version': 'test-legal-v1',
+                        },
+                    )
+                    self.assertEqual(response.status_code, 400, response.get_json())
+                    self.assertEqual(response.get_json()['code'], 'legal_consent_required')
+
+        with app.app_context():
+            from app.models.user import User
+
+            rejected_users = User.query.filter(
+                User.email.like('personal-consent-%@example.com')
+            ).all()
+            self.assertEqual(rejected_users, [])
+
+    def test_registration_persists_legal_acceptance(self):
+        app = self.create_app(SEND_MAIL='false')
+        with app.test_client() as client:
+            response = self._register_student(client, email='legal-stored@example.com')
+        self.assertEqual(response.status_code, 201, response.get_json())
+        with app.app_context():
+            from app.models.user import User
+
+            user = User.query.filter_by(email='legal-stored@example.com').one()
+            self.assertEqual(user.legal_documents_version, 'test-legal-v1')
+            self.assertIsNotNone(user.legal_documents_accepted_at)
 
 
 if __name__ == '__main__':

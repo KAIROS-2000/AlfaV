@@ -139,8 +139,7 @@ def redis_available() -> bool:
         return False
 
 
-def redis_ping_with_timeout_ms(timeout_ms: int | None = None) -> bool:
-    limit = timeout_ms if timeout_ms is not None else Config.REDIS_HEALTH_PING_MS
+def redis_ping_with_timeout_ms() -> bool:
     if not Config.REDIS_URL or not Config.REDIS_URL.strip():
         return True
     client = get_redis(Config.REDIS_DB_LEADERBOARD)

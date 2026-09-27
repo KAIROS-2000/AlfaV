@@ -5,8 +5,8 @@ import type { AdminTeacherRequestsResponse } from '@/types'
 
 export default async function AdminTeacherRequestsPage() {
   const requests = await serverApi<AdminTeacherRequestsResponse>(
-    '/admin/teacher-requests?status=pending&page=1&page_size=20',
-  ).catch(() => null)
+    '/admin/teacher-requests?status=pending&page=1&page_size=15',
+  )
 
   return (
     <AdminAreaShell area="admin" section="teacher-requests">

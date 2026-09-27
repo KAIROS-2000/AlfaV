@@ -43,10 +43,12 @@ class CodeJudgeSecurityTests(unittest.TestCase):
         self._tempdirs.append(tempdir)
         database_path = Path(tempdir.name) / 'test.db'
         env = {
+            'CODEQUEST_SKIP_DOTENV': 'true',
             'APP_ENV': 'development',
             'SECRET_KEY': 'UnitTestSecretKey123!UnitTestSecretKey123!',
             'DATABASE_URL': f'sqlite:///{database_path.as_posix()}',
             'CLIENT_URL': 'http://localhost:3000',
+            'LEGAL_DOCUMENTS_VERSION': 'test-legal-v1',
             'ENABLE_DEMO_DATA': 'false',
             'SUPERADMIN_BOOTSTRAP': 'false',
             'SESSION_COOKIE_SECURE': 'false',
@@ -56,10 +58,18 @@ class CodeJudgeSecurityTests(unittest.TestCase):
             'CODE_JUDGE_RUNNER_TOKEN': 'unit-test-runner-token',
             'CODE_JUDGE_ALLOW_LOCAL_FALLBACK': 'false',
             'METRICS_DEBUG': 'false',
+            'SEND_MAIL': 'false',
+            'REDIS_PASSWORD_FILE': '',
+            'POSTGRES_PASSWORD_FILE': '',
+            'CODE_JUDGE_RUNNER_TOKEN_FILE': '',
+            'READINESS_REQUIRE_REDIS': 'false',
+            'READINESS_REQUIRE_JUDGE': 'false',
+            'ENABLE_AUDIT_LOG_DAILY_EXPORT_THREAD': 'false',
+            'ENABLE_PARENT_WEEKLY_PROGRESS_EMAIL_THREAD': 'false',
         }
         env.update(env_overrides)
 
-        with patch.dict(os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=True):
             import app.core.config as config_module
             import app as app_module
 
@@ -86,6 +96,41 @@ class CodeJudgeSecurityTests(unittest.TestCase):
 
         self.assertEqual(headers['Content-Type'], 'application/json')
         self.assertEqual(headers['Authorization'], 'Bearer unit-test-runner-token')
+
+    def test_judge_smoke_submits_python_and_javascript_without_printing_secrets(self):
+        app = self.create_app()
+        passing_report = {
+            'passed': True,
+            'tests_passed': 1,
+            'tests_total': 1,
+        }
+
+        with patch(
+            'app.core.code_judge._post_to_runner',
+            side_effect=[passing_report, passing_report],
+        ) as post_to_runner:
+            result = app.test_cli_runner().invoke(args=['judge-smoke'])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn('Judge smoke passed', result.output)
+        self.assertNotIn('unit-test-runner-token', result.output)
+        payloads = [call.args[0] for call in post_to_runner.call_args_list]
+        self.assertEqual([payload['language'] for payload in payloads], ['python', 'javascript'])
+        self.assertTrue(all(len(payload['tests']) == 1 for payload in payloads))
+        self.assertTrue(all(payload['time_limit_ms'] == 5000 for payload in payloads))
+
+    def test_judge_smoke_exits_nonzero_on_failed_case_without_printing_secrets(self):
+        app = self.create_app()
+
+        with patch(
+            'app.core.code_judge._post_to_runner',
+            return_value={'passed': False, 'tests_passed': 0, 'tests_total': 1},
+        ):
+            result = app.test_cli_runner().invoke(args=['judge-smoke'])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn('Judge smoke failed for python', result.output)
+        self.assertNotIn('unit-test-runner-token', result.output)
 
     def test_production_runner_requires_strong_token(self):
         with self.assertRaisesRegex(RuntimeError, 'CODE_JUDGE_RUNNER_TOKEN'):

@@ -1,5 +1,8 @@
+'use client'
+
 import Link from 'next/link'
-import type { ReactNode } from 'react'
+import { usePathname } from 'next/navigation'
+import { createContext, useContext, type ReactNode } from 'react'
 
 type AdminArea = 'admin' | 'superadmin' | 'manager'
 type AdminSection =
@@ -26,6 +29,8 @@ interface NavItem {
   label: string
   description: string
 }
+
+const SuperadminLayoutContext = createContext(false)
 
 const NAV_ITEMS: Record<AdminArea, NavItem[]> = {
   admin: [
@@ -253,16 +258,26 @@ export function AdminAreaShell({
   children,
 }: {
   area: AdminArea
-  section: AdminSection
+  section?: AdminSection
   children: ReactNode
 }) {
+  const pathname = usePathname()
+  const insideSuperadminLayout = useContext(SuperadminLayoutContext)
+  // Existing pages still wrap their content; the shared layout owns the only
+  // persistent navigation when browsing superadmin routes.
+  if (area === 'superadmin' && insideSuperadminLayout) return children
+
   const items = NAV_ITEMS[area]
+  const activeSection = section ?? items.find(
+    (item) => pathname === item.href || pathname.startsWith(`${item.href}/`),
+  )?.key ?? 'users'
 
   return (
+    <SuperadminLayoutContext.Provider value={area === 'superadmin'}>
     <main className="brand-admin-shell">
       <div className="page-shell mx-auto w-full max-w-[96rem] space-y-6">
         <div className="admin-area__mobile-nav codequest-card">
-          <NavLinks items={items} section={section} compact />
+          <NavLinks items={items} section={activeSection} compact />
         </div>
 
         <div className="admin-area__layout">
@@ -282,7 +297,7 @@ export function AdminAreaShell({
                 </p>
               </div>
               <nav className="admin-area__sidebar-nav">
-                <NavLinks items={items} section={section} />
+                <NavLinks items={items} section={activeSection} />
               </nav>
             </div>
           </aside>
@@ -291,5 +306,6 @@ export function AdminAreaShell({
         </div>
       </div>
     </main>
+    </SuperadminLayoutContext.Provider>
   )
 }

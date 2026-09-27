@@ -89,8 +89,10 @@ export function CosmeticsShop({ user, onClose, onUserUpdate }: Props) {
     }
   }
 
-  async function handleEquip(item: CosmeticItem) {
+  async function handleEquip(item: CosmeticItem, button: HTMLButtonElement) {
     if (busy) return
+    const rect = button.getBoundingClientRect()
+    const origin = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
     setBusy(item.key + '_equip')
     try {
       const res = await api<{ user: UserItem }>(
@@ -98,10 +100,11 @@ export function CosmeticsShop({ user, onClose, onUserUpdate }: Props) {
         { method: 'POST', body: JSON.stringify({ item_key: item.key, slot: item.type }) },
         true,
       )
+      const transition = item.type === 'theme'
+        ? setThemeWithTransition(res.user.theme as AppTheme, { origin })
+        : undefined
       onUserUpdate(res.user, item.type === 'theme' ? item.key : undefined)
-      if (item.type === 'theme') {
-        await setThemeWithTransition(res.user.theme as AppTheme)
-      }
+      await transition
       showSuccessToast('Надено!')
     } catch (e) {
       showErrorToast(getApiErrorMessage(e, 'Не удалось надеть предмет.'))
@@ -110,8 +113,10 @@ export function CosmeticsShop({ user, onClose, onUserUpdate }: Props) {
     }
   }
 
-  async function handleUnequip(slot: Tab) {
+  async function handleUnequip(slot: Tab, button: HTMLButtonElement) {
     if (busy) return
+    const rect = button.getBoundingClientRect()
+    const origin = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
     setBusy('unequip_' + slot)
     try {
       const res = await api<{ user: UserItem }>(
@@ -119,10 +124,11 @@ export function CosmeticsShop({ user, onClose, onUserUpdate }: Props) {
         { method: 'POST', body: JSON.stringify({ item_key: '', slot }) },
         true,
       )
+      const transition = slot === 'theme'
+        ? setThemeWithTransition(res.user.theme as AppTheme, { origin })
+        : undefined
       onUserUpdate(res.user)
-      if (slot === 'theme') {
-        await setThemeWithTransition(res.user.theme as AppTheme)
-      }
+      await transition
     } catch {
       // ignore
     } finally {
@@ -183,7 +189,7 @@ export function CosmeticsShop({ user, onClose, onUserUpdate }: Props) {
             <button
               className="shop-unequip-btn"
               disabled={!!busy}
-              onClick={() => void handleUnequip(tab)}
+              onClick={(event) => void handleUnequip(tab, event.currentTarget)}
             >
               Снять
             </button>
@@ -256,7 +262,7 @@ export function CosmeticsShop({ user, onClose, onUserUpdate }: Props) {
                       <button
                         className={`shop-btn ${isEquipped ? 'shop-btn--equipped' : 'shop-btn--equip'}`}
                         disabled={isBusy || isEquipped}
-                        onClick={() => void handleEquip(item)}
+                        onClick={(event) => void handleEquip(item, event.currentTarget)}
                       >
                         {isBusy ? '...' : isEquipped ? 'Надето' : 'Надеть'}
                       </button>

@@ -84,255 +84,164 @@ def build_learning_modules(
 ) -> list[dict]:
     """Content-only roadmap: 3 возрастные группы × 10 модулей × 5 уроков."""
 
-    def theory_blocks(group_label: str, title: str, module_title: str, summary: str, skills: list[str], has_code: bool) -> list[dict]:
-        """Student-facing theory. No teacher notes inside theory_blocks."""
+    from .lesson_specs import get_lesson_spec, validate_lesson_specs
 
-        if group_label == "7–10":
-            age_intro = (
-                "Сегодня ты учишься думать как маленький инженер: сначала понять цель, "
-                "потом разложить задачу на простые шаги, выполнить их и проверить результат."
-            )
-            simple_explanation = (
-                f"Тема «{title}» помогает тебе делать инструкции понятными. "
-                "Компьютер, робот или другой человек не угадывает наши мысли. Он выполняет только то, "
-                "что мы описали точно. Поэтому важно говорить не просто «сделай красиво», а объяснять: "
-                "что должно получиться, какие шаги выполнить и как понять, что всё готово."
-            )
-            example_intro = (
-                "Похожий тренировочный пример: представь, что робот должен подготовить рабочее место перед уроком. "
-                "Это не ответ на основное задание, а маленькая разминка, чтобы понять способ работы."
-            )
-            example_steps = [
-                "Цель: на столе должны лежать тетрадь, карандаш и карточка с заданием.",
-                "Шаг 1: сначала проверь, пустой ли стол и ничего ли не мешает.",
-                "Шаг 2: положи тетрадь по центру, карандаш справа, карточку сверху.",
-                "Шаг 3: проверь результат: все три предмета на месте и их легко найти.",
-                "Теперь по такому же принципу выполни основное задание урока, но уже с другой темой.",
-            ]
-            do_not_copy = "Не копируй пример про стол как готовый ответ. Возьми только способ: цель → шаги → проверка."
-        elif group_label == "11–13":
-            age_intro = (
-                "Сегодня ты работаешь как начинающий Python-разработчик: читаешь условие, "
-                "выделяешь входные данные, пишешь короткий код и проверяешь его на примерах."
-            )
-            simple_explanation = (
-                f"Тема «{title}» нужна, чтобы программа делала маленькое, но точное действие. "
-                "В Python важно понимать три вещи: какие данные приходят в программу, какие действия с ними нужно сделать "
-                "и какой результат должен появиться на экране. Если хотя бы один из этих пунктов неясен, программа может работать не так, как ты ожидаешь."
-            )
-            example_intro = (
-                "Похожий тренировочный пример на Python: программа получает имя питомца и выводит короткую карточку питомца. "
-                "Это не решение основного задания, а пример того, как читать условие и превращать его в код."
-            )
-            example_steps = [
-                "Условие примера: считать одну строку с именем питомца и вывести текст: Питомец: <имя>.",
-                "Входные данные: одно слово или имя, которое вводит пользователь.",
-                "Ожидаемый результат: если ввели Барсик, программа выводит Питомец: Барсик.",
-                "План: input() получает строку, переменная хранит её, print() выводит готовый текст.",
-                "Проверка: запусти пример с двумя разными именами и убедись, что меняется только имя питомца.",
-            ]
-            do_not_copy = (
-                "Не вставляй этот пример как ответ. В основном задании будут другие данные и другой результат. "
-                "Используй только подход: вход → обработка → вывод → проверка."
-            )
-        else:
-            age_intro = (
-                "Сегодня ты работаешь как junior-разработчик интерфейсной логики: определяешь контракт, "
-                "пишешь небольшую функцию или фрагмент JavaScript и проверяешь поведение на примере."
-            )
-            simple_explanation = (
-                f"Тема «{title}» помогает писать код, который можно подключить к реальному интерфейсу. "
-                "В JavaScript особенно важно понимать контракт: что функция получает, что возвращает и какие случаи она должна обработать. "
-                "Хороший код не просто работает один раз — его можно прочитать, проверить и безопасно изменить."
-            )
-            example_intro = (
-                "Похожий тренировочный пример на JavaScript: функция получает имя игрока и уровень, "
-                "а возвращает короткую строку профиля. Это не ответ на основное задание, а образец рассуждения."
-            )
-            example_steps = [
-                "Условие примера: создать функцию makeProfile(name, level), которая возвращает строку name-level.",
-                "Входные данные: два значения — имя и уровень.",
-                "Ожидаемый результат: makeProfile('Mira', 3) должен вернуть Mira-3.",
-                "План: объявить функцию, собрать строку из параметров, вернуть результат через return, отдельно проверить через console.log().",
-                "Проверка: вызови функцию с другим именем и уровнем, чтобы убедиться, что результат меняется правильно.",
-            ]
-            do_not_copy = (
-                "Не используй этот пример как готовый ответ. В основной задаче будет другой контракт. "
-                "Сохрани только способ мышления: параметры → логика → return/вывод → проверка."
-            )
+    module_groups = (
+        ("junior", JUNIOR_MODULES),
+        ("middle", MIDDLE_MODULES),
+        ("senior", SENIOR_MODULES),
+    )
+    expected_lessons = {
+        f"{module_slug}-lesson-{lesson_index}": lesson_title
+        for _age_group, modules in module_groups
+        for module_slug, _module_title, _description, _icon, _color, lessons in modules
+        for lesson_index, lesson_title in enumerate(lessons, start=1)
+    }
+    validate_lesson_specs(expected_lessons)
 
-        return [
-            {"type": "hero", "title": title, "text": summary},
-            {"type": "text", "title": "Зачем это нужно", "text": age_intro},
-            {"type": "text", "title": "Объяснение простыми словами", "text": simple_explanation},
-            {"type": "list", "title": "Что ты поймёшь на уроке", "items": skills},
-            {"type": "list", "title": "Как думать при решении", "items": [
-                "Сначала прочитай условие до конца и найди главную цель.",
-                "Определи, что уже известно: текст, числа, действия, правила или данные.",
-                "Разбей решение на маленькие шаги, которые можно проверить отдельно.",
-                "Сравни результат с примером: совпадает ли смысл, порядок и формат ответа.",
-                "Если что-то не работает, не стирай всё сразу — найди первый шаг, где появилась ошибка.",
-            ]},
-            {"type": "example", "title": "Тренировочный пример перед основным заданием", "text": example_intro},
-            {"type": "list", "title": "Как выполнить похожий пример", "items": example_steps},
-            {"type": "tip", "title": "Важное правило", "text": do_not_copy},
-            {"type": "list", "title": "Частые ошибки", "items": [
-                "Начать делать задание, не поняв, какой результат нужен.",
-                "Пропустить проверку на простом примере.",
-                "Сделать шаги слишком общими: другому человеку или компьютеру будет непонятно, что выполнять.",
-                "Исправлять код или инструкцию наугад вместо поиска конкретной ошибки.",
-            ]},
-            {"type": "list", "title": "Перед отправкой проверь", "items": [
-                "Я могу объяснить решение своими словами.",
-                "В моём решении есть понятные шаги.",
-                "Я проверил результат хотя бы на одном примере.",
-                "Я понимаю, чем тренировочный пример отличается от основного задания.",
-            ]},
+    def quiz_questions(
+        prefix: str,
+        title: str,
+        key_points: list[str],
+        example_steps: list[dict],
+    ) -> list[dict]:
+        step_titles = [step["title"] for step in example_steps]
+        deterministic_seed = sum(
+            index * ord(character)
+            for index, character in enumerate(prefix, start=1)
+        )
+        single_correct_index = deterministic_seed % 4
+        single_options = [
+            "Результат можно не проверять.",
+            "Достаточно запомнить название темы.",
+            "Любой случайный ответ будет правильным.",
+        ]
+        single_options.insert(single_correct_index, key_points[0])
+
+        multiple_distractor_index = (deterministic_seed // 4) % 4
+        multiple_options = list(key_points)
+        multiple_options.insert(
+            multiple_distractor_index,
+            "Пропустить разбор примера.",
+        )
+        multiple_correct = [
+            index for index in range(4) if index != multiple_distractor_index
         ]
 
-    def interactive_steps(title: str, has_code: bool) -> list[dict]:
-        if has_code:
-            return [
-                {"title": "Контракт задачи", "text": f"Перед решением темы «{title}» ученик называет входные данные, ожидаемый вывод и критерий проверки."},
-                {"title": "Мини-реализация", "text": "Пишем или читаем стартовый код, выделяем переменные, условие/цикл/функцию и точку вывода."},
-                {"title": "Тест и улучшение", "text": "Запускаем тесты, намеренно обсуждаем возможную ошибку, затем улучшаем читаемость решения."},
-            ]
+        order_shift = deterministic_seed % 2 + 1
+        shuffled_step_titles = (
+            step_titles[order_shift:] + step_titles[:order_shift]
+        )
         return [
-            {"title": "Наблюдение", "text": f"Ученики смотрят на пример по теме «{title}» и называют действия в правильном порядке."},
-            {"title": "Сборка правила", "text": "Группа собирает правило на карточках: старт, шаги, проверка, результат."},
-            {"title": "Робот-проверка", "text": "Один ученик выполняет инструкцию буквально, остальные ищут неточности и улучшают алгоритм."},
+            _question_single(
+                prefix + "a",
+                f"Какое утверждение верно для темы «{title}»?",
+                single_options,
+                single_correct_index,
+            ),
+            _question_multiple(
+                prefix + "b",
+                f"Что важно учитывать в теме «{title}»?",
+                multiple_options,
+                multiple_correct,
+            ),
+            _question_order(
+                prefix + "c",
+                "Восстанови порядок разобранного примера.",
+                shuffled_step_titles,
+                step_titles,
+            ),
         ]
 
-    def quiz_questions(prefix: str, title: str) -> list[dict]:
-        return [
-            _question_single(prefix + "a", f"Что важнее всего в теме «{title}»?", ["Понять цель и проверить результат", "Скопировать ответ", "Пропустить практику", "Не читать условие"], 0),
-            _question_multiple(prefix + "b", "Какие действия делают решение качественным?", ["Разбить на шаги", "Проверить на примере", "Объяснить словами", "Игнорировать ошибки"], [0, 1, 2]),
-            _question_order(prefix + "c", "Правильный порядок работы.", ["Понять задачу", "Собрать решение", "Проверить результат"], ["Понять задачу", "Собрать решение", "Проверить результат"]),
+    def lesson_payload(
+        age_group: str,
+        module_slug: str,
+        lesson_index: int,
+        title: str,
+    ) -> dict:
+        lesson_slug = f"{module_slug}-lesson-{lesson_index}"
+        spec = get_lesson_spec(lesson_slug)
+        practice = spec["practice"]
+        is_code = practice["kind"] == "code"
+        starter_code = practice.get("starter_code", "") if is_code else ""
+        minimum_answer_length = {
+            "junior": 80,
+            "middle": 100,
+            "senior": 120,
+        }[age_group]
+        practice_prompt = practice["prompt"]
+        if not is_code:
+            practice_prompt = (
+                f"{practice_prompt} Ответ должен содержать не меньше "
+                f"{minimum_answer_length} символов."
+            )
+        task_validation = (
+            _stdio_validation(practice["language"], practice["tests"])
+            if is_code
+            else {
+                "keywords": practice["keywords"],
+                "require_all_keywords": True,
+                "minimum_answer_length": minimum_answer_length,
+            }
+        )
+        prefix = {
+            "junior": "j",
+            "middle": "m",
+            "senior": "s",
+        }[age_group]
+        payload = _lesson_payload(
+            title,
+            spec["objective"],
+            spec["key_points"],
+            practice["title"],
+            practice_prompt,
+            practice.get("keywords", []),
+            practice["hints"],
+            quiz_questions(
+                f"{prefix}{module_slug[-8:]}{lesson_index}",
+                title,
+                spec["key_points"],
+                spec["example_steps"],
+            ),
+            starter_code,
+            task_validation,
+        )
+        payload["theory_blocks"] = [
+            {
+                "type": "hero",
+                "title": title,
+                "text": spec["objective"],
+            },
+            {
+                "type": "text",
+                "title": "Объяснение темы",
+                "text": spec["explanation"],
+            },
+            {
+                "type": "list",
+                "title": "Главное, что нужно запомнить",
+                "items": spec["key_points"],
+            },
         ]
-
-    def text_lesson(group: str, mi: int, li: int, module_title: str, title: str, module_description: str) -> dict:
-        skills = ["алгоритмическое мышление", "точные инструкции", "проверка результата", "цифровая грамотность"]
-        payload = _lesson_payload(
-            title,
-            f"{module_description} Урок переводит идею «{title}» в понятную практику без сложного синтаксиса.",
-            skills,
-            f"Собери план: {title}",
-            f"Опиши 4–6 шагов для темы «{title}». Используй слова: старт, шаг, проверка, результат.",
-            ["старт", "шаг", "проверка", "результат"],
-            ["Начни с первого действия.", "Пиши так, чтобы другой человек мог выполнить буквально.", "В конце добавь проверку результата."],
-            quiz_questions(f"{group}{mi:02d}{li:02d}", title),
-        )
-        payload["theory_blocks"] = theory_blocks("7–10", title, module_title, payload["summary"], skills, False)
-        payload["interactive_steps"] = interactive_steps(title, False)
-        return payload
-
-    def middle_code(mi: int, li: int, title: str) -> tuple[str, list[dict], str, str, list[str]]:
-        pattern = (li - 1) % 5
-        if pattern == 0:
-            code = f'print("Урок: {title}")\n'
-            tests = [{"label": "Тест 1", "input": "", "expected": f"Урок: {title}\n"}]
-            return code, tests, "Выведи название урока", f"Напиши Python-код: выведи строку Урок: {title}", ["Используй print().", "Строка должна совпасть точно.", "Проверь кавычки."]
-        if pattern == 1:
-            code = 'name = input().strip()\nprint(f"Привет, {name}!")\n'
-            tests = [{"label": "Тест 1", "input": "Аня\n", "expected": "Привет, Аня!\n"}, {"label": "Тест 2", "input": "Илья\n", "expected": "Привет, Илья!\n"}]
-            return code, tests, "Поздоровайся по имени", "Напиши Python-код: считай имя из stdin и выведи Привет, <имя>!", ["Сохрани input() в переменную.", "Используй f-строку.", "Не забудь восклицательный знак."]
-        if pattern == 2:
-            code = 'value = int(input())\nprint(value * 2)\n'
-            tests = [{"label": "Тест 1", "input": "6\n", "expected": "12\n"}, {"label": "Тест 2", "input": "-3\n", "expected": "-6\n"}]
-            return code, tests, "Удвой число", "Напиши Python-код: считай число и выведи его, умноженное на 2.", ["input() возвращает строку.", "Используй int().", "Выведи результат через print()."]
-        if pattern == 3:
-            code = 'score = int(input())\nif score >= 70:\n    print("pass")\nelse:\n    print("retry")\n'
-            tests = [{"label": "Тест 1", "input": "70\n", "expected": "pass\n"}, {"label": "Тест 2", "input": "45\n", "expected": "retry\n"}]
-            return code, tests, "Проверь порог", "Напиши Python-код: считай score. Если score >= 70, выведи pass, иначе retry.", ["Порог 70 проходит.", "Не забудь отступы.", "Проверь обе ветки."]
-        code = 'items = input().split()\nprint(len(items))\n'
-        tests = [{"label": "Тест 1", "input": "код тест демо\n", "expected": "3\n"}, {"label": "Тест 2", "input": "python\n", "expected": "1\n"}]
-        return code, tests, "Посчитай элементы", "Напиши Python-код: считай слова через пробел и выведи количество элементов.", ["split() создаёт список.", "len() считает элементы.", "Выводи только число."]
-
-    def code_lesson_py(mi: int, li: int, module_title: str, title: str, module_description: str) -> dict:
-        code, tests, task_title, task_prompt, hints = middle_code(mi, li, title)
-        skills = ["Python", "декомпозиция", "автотесты", "отладка"]
-        payload = _lesson_payload(
-            title,
-            f"{module_description} В уроке «{title}» ученик пишет маленький проверяемый Python-фрагмент.",
-            skills,
-            task_title,
-            task_prompt,
-            ["код", "python", "print"],
-            hints,
-            quiz_questions(f"m{mi:02d}{li:02d}", title),
-            code,
-            _stdio_validation("python", tests),
-        )
-        payload["theory_blocks"] = theory_blocks("11–13", title, module_title, payload["summary"], skills, True)
-        payload["interactive_steps"] = interactive_steps(title, True)
-        return payload
-
-    def senior_code(mi: int, li: int, title: str) -> tuple[str, str, str, str, list[str]]:
-        pattern = (li - 1) % 5
-        if pattern == 0:
-            code = 'let score = 10;\nscore += 5;\nconsole.log(score);\n'
-            return code, "15\n", "Обнови score", "Напиши JavaScript-код: создай score, увеличь на 5 и выведи результат.", ["score должен быть let.", "Увеличь через +=.", "Выведи через console.log()."]
-        if pattern == 1:
-            code = 'function formatUser(name, level) {\n  return `${name}:${level}`;\n}\nconsole.log(formatUser("Аня", 4));\n'
-            return code, "Аня:4\n", "Создай formatUser", "Напиши JavaScript-код: создай функцию formatUser(name, level), верни name:level и выведи пример.", ["Функция должна возвращать строку.", "Используй template literal.", "console.log вызывается снаружи."]
-        if pattern == 2:
-            code = 'function getStatus(progress) {\n  return progress >= 70 ? "pass" : "retry";\n}\nconsole.log(getStatus(80));\nconsole.log(getStatus(40));\n'
-            return code, "pass\nretry\n", "Создай getStatus", "Напиши JavaScript-код: getStatus(progress) возвращает pass от 70, иначе retry. Выведи для 80 и 40.", ["Тернарный оператор подходит для двух вариантов.", "Порог 70 включительно.", "Выведи два результата."]
-        if pattern == 3:
-            code = 'const names = ["Аня", "Илья"];\nconst cards = names.map(name => `user:${name}`);\nconsole.log(cards.join("|"));\n'
-            return code, "user:Аня|user:Илья\n", "Преобразуй массив", "Напиши JavaScript-код: через map преврати names в user:<name> и выведи через |.", ["map возвращает новый массив.", "join('|') собирает строку.", "Не изменяй исходный массив."]
-        code = 'function isSafePrompt(text) {\n  const lower = text.toLowerCase();\n  return !lower.includes("password") && !lower.includes("token");\n}\nconsole.log(isSafePrompt("share token"));\n'
-        return code, "false\n", "Проверь prompt", "Напиши JavaScript-код: функция isSafePrompt возвращает false, если текст содержит password или token.", ["Приведи текст к нижнему регистру.", "Используй includes().", "Опасный token должен дать false."]
-
-    def code_lesson_js(mi: int, li: int, module_title: str, title: str, module_description: str) -> dict:
-        code, expected, task_title, task_prompt, hints = senior_code(mi, li, title)
-        skills = ["JavaScript", "контракт функции", "качество кода", "продуктовое мышление"]
-        payload = _lesson_payload(
-            title,
-            f"{module_description} В уроке «{title}» ученик реализует проверяемую JS-логику, которую можно подключить к интерфейсу.",
-            skills,
-            task_title,
-            task_prompt,
-            ["код", "javascript", "console.log"],
-            hints,
-            quiz_questions(f"s{mi:02d}{li:02d}", title),
-            code,
-            _stdio_validation("javascript", [{"label": "Тест 1", "input": "", "expected": expected}]),
-        )
-        payload["theory_blocks"] = theory_blocks("14–15", title, module_title, payload["summary"], skills, True)
-        payload["interactive_steps"] = interactive_steps(title, True)
+        payload["interactive_steps"] = spec["example_steps"]
         return payload
 
     modules: list[dict] = []
-    for mi, (slug, title, description, icon, color, lessons) in enumerate(JUNIOR_MODULES, start=1):
-        modules.append({
-            "slug": slug,
-            "title": title,
-            "description": description,
-            "age_group": "junior",
-            "icon": icon,
-            "color": color,
-            "lessons": [text_lesson("j", mi, li, title, lesson_title, description) for li, lesson_title in enumerate(lessons, start=1)],
-        })
-    for mi, (slug, title, description, icon, color, lessons) in enumerate(MIDDLE_MODULES, start=1):
-        modules.append({
-            "slug": slug,
-            "title": title,
-            "description": description,
-            "age_group": "middle",
-            "icon": icon,
-            "color": color,
-            "lessons": [code_lesson_py(mi, li, title, lesson_title, description) for li, lesson_title in enumerate(lessons, start=1)],
-        })
-    for mi, (slug, title, description, icon, color, lessons) in enumerate(SENIOR_MODULES, start=1):
-        modules.append({
-            "slug": slug,
-            "title": title,
-            "description": description,
-            "age_group": "senior",
-            "icon": icon,
-            "color": color,
-            "lessons": [code_lesson_js(mi, li, title, lesson_title, description) for li, lesson_title in enumerate(lessons, start=1)],
-        })
+    for age_group, module_group in module_groups:
+        for slug, title, description, icon, color, lessons in module_group:
+            modules.append(
+                {
+                    "slug": slug,
+                    "title": title,
+                    "description": description,
+                    "age_group": age_group,
+                    "icon": icon,
+                    "color": color,
+                    "lessons": [
+                        lesson_payload(age_group, slug, lesson_index, lesson_title)
+                        for lesson_index, lesson_title in enumerate(lessons, start=1)
+                    ],
+                }
+            )
 
     return modules

@@ -34,10 +34,12 @@ class ParentCabinetTests(unittest.TestCase):
         self._tempdirs.append(tempdir)
         database_path = Path(tempdir.name) / "test.db"
         env = {
+            "CODEQUEST_SKIP_DOTENV": "true",
             "APP_ENV": "development",
             "SECRET_KEY": "UnitTestSecretKey123!UnitTestSecretKey123!",
             "DATABASE_URL": f"sqlite:///{database_path.as_posix()}",
             "CLIENT_URL": "http://localhost:3000",
+            "LEGAL_DOCUMENTS_VERSION": "test-legal-v1",
             "ENABLE_DEMO_DATA": "false",
             "SUPERADMIN_BOOTSTRAP": "false",
             "SESSION_COOKIE_SECURE": "false",
@@ -45,9 +47,18 @@ class ParentCabinetTests(unittest.TestCase):
             "CODE_JUDGE_RUNNER_URL": "",
             "CODE_JUDGE_RUNNER_TOKEN": "",
             "METRICS_DEBUG": "false",
+            "SEND_MAIL": "false",
+            "REDIS_URL": "",
+            "REDIS_PASSWORD": "",
+            "REDIS_PASSWORD_FILE": "",
+            "POSTGRES_PASSWORD_FILE": "",
+            "CODE_JUDGE_RUNNER_TOKEN_FILE": "",
+            "READINESS_REQUIRE_REDIS": "false",
+            "ENABLE_AUDIT_LOG_DAILY_EXPORT_THREAD": "false",
+            "ENABLE_PARENT_WEEKLY_PROGRESS_EMAIL_THREAD": "false",
         }
         env.update(env_overrides)
-        with patch.dict(os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=True):
             import app.core.config as config_module
             import app as app_module
 
@@ -74,7 +85,15 @@ class ParentCabinetTests(unittest.TestCase):
             # password and sends it by mail; we don't post a password here.
             r = client.post(
                 "/api/auth/register",
-                json={"email": "parent1@example.com", "role": "parent"},
+                json={
+                    "email": "parent1@example.com",
+                    "password": "ParentPass123!",
+                    "role": "parent",
+                    "privacy_accepted": True,
+                    "terms_accepted": True,
+                    "personal_data_accepted": True,
+                    "legal_documents_version": "test-legal-v1",
+                },
             )
             self.assertEqual(r.status_code, 201, r.get_data(as_text=True))
             payload = r.get_json() or {}
@@ -86,7 +105,7 @@ class ParentCabinetTests(unittest.TestCase):
             )
             self.assertEqual(
                 payload.get("parent_profile_required_fields"),
-                ["full_name", "phone", "email_verified"],
+                ["full_name", "phone"],
             )
 
         with app.app_context():
@@ -170,13 +189,21 @@ class ParentCabinetTests(unittest.TestCase):
             self.assertIn("paragraph", res.get_json() or {})
 
     def test_parent_link_blocked_until_profile_complete(self):
-        """Parent must fill name + phone AND verify email before linking a child."""
+        """Parent must fill name and phone before linking a child."""
 
         app = self.create_app()
         with app.test_client() as client:
             r = client.post(
                 "/api/auth/register",
-                json={"email": "parent2@example.com", "role": "parent"},
+                json={
+                    "email": "parent2@example.com",
+                    "password": "ParentPass123!",
+                    "role": "parent",
+                    "privacy_accepted": True,
+                    "terms_accepted": True,
+                    "personal_data_accepted": True,
+                    "legal_documents_version": "test-legal-v1",
+                },
             )
             self.assertEqual(r.status_code, 201, r.get_data(as_text=True))
 
@@ -189,7 +216,7 @@ class ParentCabinetTests(unittest.TestCase):
             self.assertEqual(body.get("code"), "parent_profile_incomplete")
             self.assertEqual(
                 set(body.get("missing_fields") or []),
-                {"full_name", "phone", "email_verified"},
+                {"full_name", "phone"},
             )
 
             status = client.get("/api/parent/profile/status")
@@ -198,7 +225,7 @@ class ParentCabinetTests(unittest.TestCase):
             self.assertFalse(status_body.get("ready_to_link_child"))
             self.assertEqual(
                 set(status_body.get("missing_fields") or []),
-                {"full_name", "phone", "email_verified"},
+                {"full_name", "phone"},
             )
 
     def test_parent_messaging_threads_lists_classroom_contacts_for_child_in_class(self):

@@ -10,7 +10,6 @@ Covers:
 """
 from __future__ import annotations
 
-import hashlib
 import importlib
 import io
 import os
@@ -49,10 +48,12 @@ class AssignmentImagesBase(unittest.TestCase):
         (media_dir / 'assignment-images').mkdir(parents=True, exist_ok=True)
         database_path = Path(tempdir.name) / 'test.db'
         env = {
+            'CODEQUEST_SKIP_DOTENV': 'true',
             'APP_ENV': 'development',
             'SECRET_KEY': 'UnitTestSecretKey123!UnitTestSecretKey123!',
             'DATABASE_URL': f'sqlite:///{database_path.as_posix()}',
             'CLIENT_URL': 'http://localhost:3000',
+            'LEGAL_DOCUMENTS_VERSION': 'test-legal-v1',
             'ENABLE_DEMO_DATA': 'false',
             'SUPERADMIN_BOOTSTRAP': 'false',
             'SESSION_COOKIE_SECURE': 'false',
@@ -60,12 +61,22 @@ class AssignmentImagesBase(unittest.TestCase):
             'GIGACHAT_VERIFY_SSL': 'true',
             'CODE_JUDGE_RUNNER_URL': '',
             'CODE_JUDGE_RUNNER_TOKEN': '',
+            'CODE_JUDGE_RUNNER_TOKEN_FILE': '',
             'METRICS_DEBUG': 'false',
             'MEDIA_DIR': str(media_dir),
+            'SEND_MAIL': 'false',
+            'REDIS_URL': '',
+            'REDIS_PASSWORD': '',
+            'REDIS_PASSWORD_FILE': '',
+            'POSTGRES_PASSWORD_FILE': '',
+            'READINESS_REQUIRE_REDIS': 'false',
+            'READINESS_REQUIRE_JUDGE': 'false',
+            'ENABLE_AUDIT_LOG_DAILY_EXPORT_THREAD': 'false',
+            'ENABLE_PARENT_WEEKLY_PROGRESS_EMAIL_THREAD': 'false',
         }
         env.update(env_overrides)
 
-        with patch.dict(os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=True):
             import app.core.config as config_module
             import app as app_module
 
@@ -183,7 +194,7 @@ class BackfillTests(AssignmentImagesBase):
             self.assertEqual(second_pass, 0)
 
             for aid in (a1, a2):
-                row = Assignment.query.get(aid)
+                row = db.session.get(Assignment, aid)
                 self.assertIsNotNone(row.image_id)
                 self.assertEqual(row.image.format, 'svg')
                 self.assertTrue(row.image.is_generated)
@@ -315,7 +326,7 @@ class AttachEndpointTests(AssignmentImagesBase):
             from app.services.assignment_images import create_or_reuse_svg_placeholder
 
             asset = create_or_reuse_svg_placeholder(title='cover', seed='detach')
-            assignment = Assignment.query.get(assignment_id)
+            assignment = db.session.get(Assignment, assignment_id)
             assignment.image_id = asset.id
             db.session.commit()
 
@@ -341,15 +352,16 @@ class AssignmentsLightEndpointTests(AssignmentImagesBase):
             from app.services.assignment_images import create_or_reuse_svg_placeholder
 
             asset = create_or_reuse_svg_placeholder(title='cover', seed=f'al:{a1}')
-            Assignment.query.get(a1).image_id = asset.id
+            db.session.get(Assignment, a1).image_id = asset.id
             db.session.commit()
 
         with app.test_client() as client:
             self.login_admin(client)
-            r = client.get('/api/admin/assignments-light?page=1&page_size=10')
+            r = client.get('/api/admin/assignments-light?page=1&page_size=100')
         self.assertEqual(r.status_code, 200)
         payload = r.get_json()
         self.assertIn('assignments', payload)
+        self.assertEqual(payload['pagination']['page_size'], 15)
         match = next((row for row in payload['assignments'] if row['id'] == a1), None)
         self.assertIsNotNone(match)
         self.assertIsNotNone(match['image_id'])
@@ -368,9 +380,9 @@ class MediaServingTests(AssignmentImagesBase):
             sha = asset.sha256
 
         with app.test_client() as client:
-            r = client.get(f'/api/media/assignment-images/{sha}.svg')
-        self.assertEqual(r.status_code, 200)
-        self.assertIn(b'<svg', r.data)
+            with client.get(f'/api/media/assignment-images/{sha}.svg') as response:
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(b'<svg', response.data)
 
     def test_assignment_image_route_blocks_html_extension(self):
         app, _ = self.create_app()

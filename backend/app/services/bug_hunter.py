@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from flask import current_app
 
 from ..core.db import db
+from ..core.pagination import DEFAULT_PAGE_SIZE, paginate_query
 from ..models.bug_hunter import (
     BUG_REPORT_STATUS_APPROVED,
     BUG_REPORT_STATUS_PENDING,
@@ -101,26 +102,35 @@ def create_report(
     }, 201
 
 
-def list_my_reports(user: User, *, limit: int = 50) -> dict:
-    q = (
+def list_my_reports(
+    user: User,
+    *,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> dict:
+    query = (
         BugHunterReport.query.filter_by(user_id=user.id)
         .order_by(BugHunterReport.created_at.desc(), BugHunterReport.id.desc())
-        .limit(min(max(limit, 1), 100))
-        .all()
     )
+    rows, pagination = paginate_query(query, page=page, page_size=page_size)
     return {
-        'reports': [r.to_dict() for r in q],
+        'reports': [row.to_dict() for row in rows],
         'xp_reward_on_approval': get_bug_hunter_approved_xp(),
+        'pagination': pagination,
     }
 
 
-def staff_list_rows(*, status: str | None = None, limit: int = 100) -> list[BugHunterReport]:
-    q = BugHunterReport.query.order_by(
-        BugHunterReport.created_at.desc(), BugHunterReport.id.desc()
-    )
+def staff_list_rows(
+    *,
+    status: str | None = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> tuple[list[BugHunterReport], dict]:
+    q = BugHunterReport.query
     if status and status != 'all':
         q = q.filter(BugHunterReport.moderation_status == status)
-    return q.limit(min(max(limit, 1), 200)).all()
+    q = q.order_by(BugHunterReport.created_at.desc(), BugHunterReport.id.desc())
+    return paginate_query(q, page=page, page_size=page_size)
 
 
 def staff_moderate(

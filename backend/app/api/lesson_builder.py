@@ -91,30 +91,49 @@ def normalize_quiz_questions(raw_questions, question_prefix: str = 'quiz-q') -> 
             continue
 
         if qtype == 'match':
+            # The builder and seeded content use left/right/correct, while an
+            # older endpoint accepted pairs.  Accept both contracts and emit
+            # the canonical left/right/correct form.
             raw_pairs = item.get('pairs')
-            if not isinstance(raw_pairs, list):
-                continue
-            pairs: list[tuple[str, str]] = []
-            right_values: list[str] = []
-            correct_map: dict[str, str] = {}
-            for pair in raw_pairs:
-                if not isinstance(pair, dict):
-                    continue
-                left = str(pair.get('left') or '').strip()
-                right = str(pair.get('right') or '').strip()
-                if not left or not right or left in correct_map:
-                    continue
-                correct_map[left] = right
-                pairs.append((left, right))
-                if right not in right_values:
-                    right_values.append(right)
-            if len(pairs) < 2 or len(right_values) < 2:
+            if isinstance(raw_pairs, list):
+                pairs = [
+                    (str(pair.get('left') or '').strip(), str(pair.get('right') or '').strip())
+                    for pair in raw_pairs
+                    if isinstance(pair, dict)
+                ]
+                pairs = [(left, right) for left, right in pairs if left and right]
+                left_values = [left for left, _ in pairs]
+                right_values = []
+                correct_map: dict[str, str] = {}
+                for left, right in pairs:
+                    if left in correct_map:
+                        continue
+                    correct_map[left] = right
+                    if right not in right_values:
+                        right_values.append(right)
+            else:
+                left_values = string_list(item.get('left'))
+                right_values = string_list(item.get('right'))
+                raw_correct = item.get('correct')
+                correct_map = {
+                    str(left).strip(): str(right).strip()
+                    for left, right in raw_correct.items()
+                    if str(left).strip() and str(right).strip()
+                } if isinstance(raw_correct, dict) else {}
+            if (
+                len(left_values) < 2
+                or len(right_values) < 2
+                or len(set(left_values)) != len(left_values)
+                or len(set(right_values)) != len(right_values)
+                or set(correct_map) != set(left_values)
+                or any(value not in right_values for value in correct_map.values())
+            ):
                 continue
             normalized.append({
                 'id': question_id,
                 'type': qtype,
                 'prompt': prompt,
-                'left': [left for left, _ in pairs],
+                'left': left_values,
                 'right': right_values,
                 'correct': correct_map,
             })

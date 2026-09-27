@@ -11,8 +11,10 @@ import { queueMascotScenario } from '@/lib/mascot'
 import { setAuthenticatedSession } from '@/lib/session-store'
 import { setTheme } from '@/lib/theme'
 import { isValidRuPhone, normalizeRuPhoneInput } from '@/lib/phone'
-import { showErrorToast, showSuccessToast } from '@/lib/toast'
+import { showErrorToast } from '@/lib/toast'
 import { AuthOptions, UserItem } from '@/types'
+import type { RegistrationLegalConfig } from '@/lib/site-config'
+import { awaitsParentPasswordSetup } from '@/lib/registration-flow'
 import Image from 'next/image'
 import Link from 'next/link'
 import { FormEvent, useMemo, useRef, useState } from 'react'
@@ -49,9 +51,11 @@ function roleLabel(role: string) {
 export function AuthForm({
 	mode,
 	options,
+	legalConfig,
 }: {
 	mode: 'login' | 'register'
 	options?: AuthOptions
+	legalConfig?: RegistrationLegalConfig
 }) {
 	const rootRef = useRef<HTMLElement | null>(null)
 	const [showPassword, setShowPassword] = useState(false)
@@ -60,6 +64,7 @@ export function AuthForm({
 	const [postRegisterEmail, setPostRegisterEmail] = useState<string | null>(null)
 	const [postRegisterRole, setPostRegisterRole] = useState<UserItem['role'] | null>(null)
 	const [resending, setResending] = useState(false)
+	const [legalAccepted, setLegalAccepted] = useState(false)
 	// Surfaced when the login response says email_not_verified — gives the
 	// user a clear explanation + a "send link again" button right next to
 	// the form they just submitted.
@@ -76,6 +81,7 @@ export function AuthForm({
 
 	const isTeacherRegistration = mode === 'register' && form.role === 'teacher'
 	const isParentRegistration = mode === 'register' && form.role === 'parent'
+	const parentPasswordRequired = isParentRegistration && options?.parent_password_required !== false
 	const strength = useMemo(() => strengthLabel(form.password), [form.password])
 
 	useUserPageMotion(rootRef, [mode, isTeacherRegistration, isParentRegistration, strength])
@@ -91,12 +97,16 @@ export function AuthForm({
 			showErrorToast('Укажите корректный email.')
 			return
 		}
+		if (mode === 'register' && !legalAccepted) {
+			showErrorToast('Подтвердите ознакомление с правовыми документами.')
+			return
+		}
 
 		// Parent self-signup is intentionally email-only: backend generates a
 		// password and sends it by email together with the verification link.
 		// Phone, name and email confirmation are required only at the
 		// "attach a child" step inside the cabinet.
-		if (mode === 'register' && !isParentRegistration) {
+		if (mode === 'register' && (!isParentRegistration || parentPasswordRequired)) {
 			if (!form.password) {
 				showErrorToast('Укажите пароль.')
 				return
@@ -133,6 +143,13 @@ export function AuthForm({
 		setLoading(true)
 
 		try {
+			const legalAcceptance = mode === 'register' ? {
+				privacy_accepted: true,
+				terms_accepted: true,
+				personal_data_accepted: true,
+				legal_documents_version: legalConfig?.legalDocumentVersion,
+				legal_acceptance_client_at: new Date().toISOString(),
+			} : {}
 			const payload =
 				mode === 'login'
 					? { login: normalizedCredential, password: form.password }
@@ -141,6 +158,8 @@ export function AuthForm({
 								email: normalizedCredential,
 								role: 'parent',
 								theme: form.theme,
+								...(parentPasswordRequired ? { password: form.password } : {}),
+								...legalAcceptance,
 							}
 						: {
 								full_name: form.full_name,
@@ -150,6 +169,7 @@ export function AuthForm({
 								role: form.role,
 								theme: form.theme,
 								...(isTeacherRegistration ? {} : { age_group: form.age_group }),
+								...legalAcceptance,
 							}
 
 			const result = await api<{
@@ -159,7 +179,9 @@ export function AuthForm({
 				verification_email_sent?: boolean
 				requires_email_verification?: boolean
 				requires_login_after_verification?: boolean
-				initial_password?: string
+				requires_password_setup?: boolean
+				password_setup_email_sent?: boolean
+				requires_login_after_password_setup?: boolean
 			}>('/auth/' + mode, {
 				method: 'POST',
 				body: JSON.stringify(payload),
@@ -185,23 +207,19 @@ export function AuthForm({
 				const isStudent = result.user.role === 'student'
 				const isParent = result.user.role === 'parent'
 				if (isParent) {
-					const initialPassword =
-						typeof result.initial_password === 'string' && result.initial_password
-							? result.initial_password
-							: null
-					if (initialPassword && typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-						try {
-							await navigator.clipboard.writeText(initialPassword)
-							showSuccessToast('Временный пароль скопирован в буфер обмена.')
-						} catch {
-							window.prompt('Сохраните временный пароль для входа:', initialPassword)
-						}
-					} else if (initialPassword) {
-						window.prompt('Сохраните временный пароль для входа:', initialPassword)
+					if (awaitsParentPasswordSetup(result)) {
+						setPostRegisterEmail(result.user.email || normalizedCredential)
+						setPostRegisterRole('parent')
+						setNotice(
+							result.message
+								|| 'Мы отправили ссылку для задания пароля. После сохранения пароля войдите в семейный кабинет.',
+						)
+						setForm({ ...form, password: '' })
+						return
 					}
-					// Parent: backend creates a session immediately. We still park
-					// them on the cabinet entry, but the welcome card from
-					// parent-cabinet-page will prompt them to fill profile & verify.
+
+					// Development deployments with mail disabled may return an active
+					// session; production password-setup responses return above.
 					setAuthenticatedSession(result.user)
 					setTheme(result.user?.theme || form.theme)
 					window.location.href = '/parent/dashboard'
@@ -451,13 +469,12 @@ export function AuthForm({
 						<div className='mt-6 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-4 text-sm leading-6 text-slate-700'>
 							<p className='font-semibold text-slate-900'>Проверьте почту</p>
 							<p className='mt-1'>
-								{postRegisterRole === 'parent' ? (
+							{postRegisterRole === 'parent' ? (
 									<>
 										Мы отправили на{' '}
 										<span className='font-semibold'>{postRegisterEmail}</span>{' '}
-										временный пароль и ссылку для подтверждения email. Сейчас
-										вы уже вошли в кабинет — но чтобы привязать ребёнка,
-										нужно подтвердить почту, заполнить имя и телефон.
+										одноразовую ссылку. Откройте её, задайте пароль, затем
+										войдите в семейный кабинет. Сессия до этого не создаётся.
 									</>
 								) : (
 									<>
@@ -476,11 +493,7 @@ export function AuthForm({
 									onClick={async () => {
 										setResending(true)
 										try {
-											await resendVerification(
-												postRegisterRole === 'parent'
-													? undefined
-													: { email: postRegisterEmail },
-											)
+										await resendVerification({ email: postRegisterEmail })
 											setNotice('Письмо отправлено повторно. Проверьте папку «Спам».')
 										} catch (resendError) {
 											showErrorToast(
@@ -496,21 +509,12 @@ export function AuthForm({
 								>
 									{resending ? 'Отправляем…' : 'Отправить письмо повторно'}
 								</button>
-								{postRegisterRole === 'parent' ? (
-									<Link
-										href='/parent/dashboard'
-										className='brand-button-ghost'
-									>
-										Перейти в кабинет
-									</Link>
-								) : (
-									<Link
-										href='/auth/login'
-										className='brand-button-ghost'
-									>
-										На страницу входа
-									</Link>
-								)}
+								<Link
+									href='/auth/login'
+									className='brand-button-ghost'
+								>
+									На страницу входа
+								</Link>
 							</div>
 						</div>
 					) : null}
@@ -583,9 +587,9 @@ export function AuthForm({
 											setForm({ ...form, role: e.target.value })
 										}}
 									>
-										{(options?.roles?.length
-											? options.roles
-											: ['student', 'teacher']
+						{(options?.roles?.length
+							? options.roles
+							: ['student', 'teacher', 'parent']
 										).map(role => (
 											<option key={role} value={role}>
 												{roleLabel(role)}
@@ -596,12 +600,12 @@ export function AuthForm({
 							)}
 						</div>
 
-						{isParentRegistration ? (
+						{isParentRegistration && !parentPasswordRequired ? (
 							<div className='rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm leading-6 text-slate-700'>
 								<p className='font-semibold text-slate-900'>Только email</p>
 								<p className='mt-1'>
-									Для семейного кабинета достаточно почты. Мы пришлём временный
-									пароль и ссылку для подтверждения email одним письмом.
+									Для семейного кабинета достаточно почты. Мы пришлём одноразовую
+									ссылку: по ней вы зададите пароль и подтвердите email.
 									Имя и телефон вы заполните позже — они нужны только для
 									привязки ребёнка.
 								</p>
@@ -657,7 +661,7 @@ export function AuthForm({
 						)}
 
 						{mode === 'register' && !isTeacherRegistration && !isParentRegistration && (
-							<label className='space-y-2'>
+							<label className='block space-y-2'>
 								<span className='auth-label text-sm font-semibold text-slate-700'>
 									Возрастная группа
 								</span>
@@ -683,8 +687,27 @@ export function AuthForm({
 							</label>
 						)}
 
+						{mode === 'register' ? (
+							<label className='flex items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-700'>
+								<input
+									type='checkbox'
+									className='mt-1 h-4 w-4 shrink-0'
+									checked={legalAccepted}
+									onChange={event => setLegalAccepted(event.target.checked)}
+									required
+								/>
+								<span>
+									Я ознакомился(-ась) с{' '}
+									<Link className='font-semibold text-sky-700 hover:underline' href='/privacy'>политикой конфиденциальности</Link>,{' '}
+									<Link className='font-semibold text-sky-700 hover:underline' href='/terms'>пользовательским соглашением</Link>{' '}
+									и <Link className='font-semibold text-sky-700 hover:underline' href='/personal-data'>условиями обработки персональных данных</Link>.
+									<span className='block text-xs text-slate-500'>Версия документов: {legalConfig?.legalDocumentVersion || 'не настроена'}.</span>
+								</span>
+							</label>
+						) : null}
+
 						<button
-							disabled={loading}
+							disabled={loading || (mode === 'register' && !legalAccepted)}
 							className='auth-submit-button brand-button-primary mt-2 w-full'
 						>
 							{loading

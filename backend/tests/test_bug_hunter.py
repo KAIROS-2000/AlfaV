@@ -91,6 +91,39 @@ class BugHunterApiTests(unittest.TestCase):
         response = client.post('/api/auth/login', json={'login': login, 'password': password})
         self.assertEqual(response.status_code, 200)
 
+    def test_bug_report_directories_are_paginated_and_capped(self):
+        app = self.create_app()
+        self.create_user(app, email='paging-hunter@example.com', password='StudentPass123!', role='student')
+        self.create_user(app, email='paging-mod@example.com', password='AdminPass123!', role='admin')
+        with app.app_context():
+            from app.core.db import db
+            from app.models.bug_hunter import BugHunterReport
+            from app.models.user import User
+
+            owner = User.query.filter_by(email='paging-hunter@example.com').one()
+            db.session.add_all([
+                BugHunterReport(
+                    user_id=owner.id,
+                    description=f'Paging report {index}',
+                    reproduction_steps='Repeat',
+                    user_journey_path='Home -> lesson',
+                )
+                for index in range(20)
+            ])
+            db.session.commit()
+
+        with app.test_client() as client:
+            self.login(client, 'paging-hunter@example.com', 'StudentPass123!')
+            mine = client.get('/api/support/bug-reports/me?page_size=100').get_json()
+            self.assertEqual(len(mine['reports']), 15)
+            self.assertEqual(mine['pagination']['total'], 20)
+            self.assertEqual(mine['pagination']['page_size'], 15)
+
+            self.login(client, 'paging-mod@example.com', 'AdminPass123!')
+            staff = client.get('/api/support/staff/bug-reports?page_size=100').get_json()
+            self.assertEqual(len(staff['reports']), 15)
+            self.assertEqual(staff['pagination']['total'], 20)
+
     def test_submit_and_approve_awards_xp(self):
         app = self.create_app()
         self.create_user(app, email='hunter@example.com', password='StudentPass123!', role='student')

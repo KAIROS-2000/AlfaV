@@ -1,0 +1,36 @@
+services:
+  db:
+    build:
+      context: ./postgres
+      dockerfile: Dockerfile
+
+  volume-init:
+    build: &backend-build
+      context: .
+      dockerfile: backend/Dockerfile
+
+  backend-init:
+    build: *backend-build
+
+  backend:
+    build: *backend-build
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: runner
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  judge-runner:
+    build:
+      context: .
+      dockerfile: judge_runner/Dockerfile
+
+  judge-gateway:
+    build:
+      context: ./caddy
+      dockerfile: Dockerfile

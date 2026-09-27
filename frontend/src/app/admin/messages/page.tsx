@@ -4,15 +4,15 @@ import type { StaffMessagingSummaryResponse, UserItem } from '@/types'
 import { redirect } from 'next/navigation'
 
 export default async function AdminMessagesPage() {
-	const session = await serverApi<{ user: UserItem }>('/auth/me').catch(() => null)
-	if (!session?.user) {
+	const session = await serverApi<{ user: UserItem }>('/auth/me')
+	if (!session.user) {
 		redirect('/auth/login')
 	}
 	if (session.user.role !== 'admin' && session.user.role !== 'superadmin') {
 		redirect('/dashboard')
 	}
 
-	const initial = await serverApi<StaffMessagingSummaryResponse>('/staff-messaging/summary').catch(() => null)
+	const initial = await serverApi<StaffMessagingSummaryResponse>('/staff-messaging/summary')
 
 	return (
 		<AdminMessagesPageView area='admin' currentUserId={session.user.id} initial={initial} />

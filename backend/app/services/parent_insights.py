@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 
 from flask import current_app
 
-from ..core.db import db
 from ..models.learning import (
     AssignmentSubmission,
     Lesson,

@@ -1,9 +1,10 @@
 'use client'
 
-import { api } from '@/lib/api'
+import { api, ApiError, getApiErrorMessage } from '@/lib/api'
+import { FiveItemPager, useFiveItemWindow } from '@/components/five-item-navigator'
 import { hasExplicitCodeTaskIntent } from '@/lib/task-intent'
 import { showErrorToast, showInfoToast, showSuccessToast } from '@/lib/toast'
-import type { ClassroomItem, LessonCatalogItem, ModuleItem } from '@/types'
+import type { ClassroomItem, LessonAuthoringDetail, LessonCatalogItem, LessonDetail, ModuleItem, PaginationMeta } from '@/types'
 import clsx from 'clsx'
 import {
   AlertTriangle,
@@ -45,6 +46,9 @@ import {
   foundationComplete,
   formatComplete,
   hasCompleteJudgeTest,
+  isIntegerInRange,
+  lessonAuthoringDraftStep,
+  lessonAuthoringToForm,
   normalizeAgeGroup,
   parseLines,
   practiceComplete,
@@ -92,11 +96,17 @@ interface ClassroomTargetConfig {
   sourceLessonId?: number | null
   draftKey?: string
   createTargetHref?: string
+  pagination?: PaginationMeta | null
+  loading?: boolean
+  onPageChange?: (page: number) => void
 }
 
 interface ModuleTargetConfig {
   kind: 'module'
   modules: ModuleItem[]
+  pagination?: PaginationMeta | null
+  loading?: boolean
+  onPageChange?: (page: number) => void
 }
 
 export type SharedLessonBuilderTargetConfig = ClassroomTargetConfig | ModuleTargetConfig
@@ -109,6 +119,30 @@ export interface SharedLessonBuilderSubmitResult {
   lesson: CreatedLessonState
   successMessage: string
   nextInsertPosition?: string
+  /** Returned after POST so later draft saves can use optimistic PATCH. */
+  authoringLesson?: LessonAuthoringDetail
+}
+
+export interface SharedLessonBuilderDraftPayload {
+  form: LessonBuilderForm
+  current_step: number
+}
+
+export interface SharedLessonBuilderSavePayload {
+  target: SharedLessonBuilderTargetSelection
+  lesson: LessonBuilderSubmitData
+  saveDraft: boolean
+  draftPayload?: SharedLessonBuilderDraftPayload
+}
+
+export interface SharedLessonBuilderUpdatePayload extends SharedLessonBuilderSavePayload {
+  lessonId: number
+  version: number
+}
+
+export interface SharedLessonBuilderPublishResult {
+  lesson: LessonAuthoringDetail
+  successMessage: string
 }
 
 interface SharedLessonBuilderProps {
@@ -116,11 +150,21 @@ interface SharedLessonBuilderProps {
   features: SharedLessonBuilderFeatures
   targetConfig: SharedLessonBuilderTargetConfig
   cancelHref?: string | null
-  submitLesson: (payload: {
-    target: SharedLessonBuilderTargetSelection
-    lesson: LessonBuilderSubmitData
-  }) => Promise<SharedLessonBuilderSubmitResult>
+  submitLesson: (payload: SharedLessonBuilderSavePayload) => Promise<SharedLessonBuilderSubmitResult>
+  updateLesson?: (payload: SharedLessonBuilderUpdatePayload) => Promise<LessonAuthoringDetail>
   onCreated?: (result: SharedLessonBuilderSubmitResult) => Promise<void> | void
+  publishCreatedLesson?: (payload: {
+    lesson: CreatedLessonState
+    target: SharedLessonBuilderTargetSelection
+  }) => Promise<string>
+  publishSavedLesson?: (payload: {
+    lesson: LessonAuthoringDetail
+    target: SharedLessonBuilderTargetSelection
+  }) => Promise<SharedLessonBuilderPublishResult>
+  editing?: {
+    lesson: LessonAuthoringDetail
+  }
+  lessonListHref?: string | null
 }
 
 function getAgeGroupLabel(value: string | null | undefined) {
@@ -141,8 +185,10 @@ function getSteps(includeQuiz: boolean) {
   return includeQuiz ? BASE_STEPS : BASE_STEPS.filter(step => step.id !== 'quiz')
 }
 
-function nextButtonLabel(stepIndex: number, steps: StepMeta[]) {
-  return stepIndex === steps.length - 1 ? 'Создать урок' : 'Далее'
+function nextButtonLabel(stepIndex: number, steps: StepMeta[], options: { editing: boolean; draft: boolean }) {
+  if (stepIndex !== steps.length - 1) return 'Далее'
+  if (options.editing) return options.draft ? 'Сохранить черновик' : 'Сохранить изменения'
+  return 'Сохранить готовый черновик'
 }
 
 function ensureDraftShape(value: unknown): value is {
@@ -262,8 +308,8 @@ function getStepRequirements(
     return [
       { label: 'Название урока заполнено.', complete: Boolean(form.title.trim()), error: 'Введите название урока.' },
       { label: 'Краткое описание заполнено.', complete: Boolean(form.summary.trim()), error: 'Добавьте краткое описание.' },
-      { label: 'Длительность указана.', complete: Boolean(form.duration.trim()), error: 'Укажите длительность урока.' },
-      { label: 'Порог прохождения указан.', complete: Boolean(form.passingScore.trim()), error: 'Укажите минимальный процент прохождения.' },
+      { label: 'Длительность указана.', complete: isIntegerInRange(form.duration, 1, 480), error: 'Укажите длительность целым числом от 1 до 480 минут.' },
+      { label: 'Порог прохождения указан.', complete: isIntegerInRange(form.passingScore, 0, 100), error: 'Укажите порог целым числом от 0 до 100.' },
     ]
   }
 
@@ -359,7 +405,12 @@ export function SharedLessonBuilder({
   targetConfig,
   cancelHref = null,
   submitLesson,
+  updateLesson,
   onCreated,
+  publishCreatedLesson,
+  publishSavedLesson,
+  editing,
+  lessonListHref = null,
 }: SharedLessonBuilderProps) {
   const manualCheckAvailable = mode === 'teacher'
   const textCheckFallback: CheckMode = manualCheckAvailable ? 'manual' : 'keywords'
@@ -383,34 +434,72 @@ export function SharedLessonBuilder({
       ? targetConfig.initialClassId ?? targetConfig.classes[0]?.id ?? null
       : null,
   )
+  const [selectedClassSnapshot, setSelectedClassSnapshot] = useState<ClassroomItem | null>(
+    targetConfig.kind === 'classroom'
+      ? targetConfig.classes.find(item => item.id === targetConfig.initialClassId) ?? targetConfig.classes[0] ?? null
+      : null,
+  )
   const [selectedModuleId, setSelectedModuleId] = useState<string>(
     targetConfig.kind === 'module' && moduleOptions[0] ? String(moduleOptions[0].id) : '',
   )
+  const [selectedModuleSnapshot, setSelectedModuleSnapshot] = useState<ModuleItem | null>(
+    targetConfig.kind === 'module' ? moduleOptions[0] ?? null : null,
+  )
   const [insertPosition, setInsertPosition] = useState('1')
-  const [publishModuleIfNeeded, setPublishModuleIfNeeded] = useState(true)
+  // Creating a lesson must never publish an entire module as a side effect.
+  const [publishModuleIfNeeded, setPublishModuleIfNeeded] = useState(false)
   const [catalog, setCatalog] = useState<LessonCatalogItem[]>([])
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [creatingLesson, setCreatingLesson] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
   const [showPassingHint, setShowPassingHint] = useState(true)
   const [lastCreatedLesson, setLastCreatedLesson] = useState<CreatedLessonState | null>(null)
+  const [lastCreatedTarget, setLastCreatedTarget] = useState<SharedLessonBuilderTargetSelection | null>(null)
+  const [lastCreatedPublished, setLastCreatedPublished] = useState(false)
+  const [publishingLesson, setPublishingLesson] = useState(false)
+  const [persistedLesson, setPersistedLesson] = useState<LessonAuthoringDetail | null>(editing?.lesson ?? null)
+  const [conflictLesson, setConflictLesson] = useState<LessonAuthoringDetail | null>(null)
   const [sourceLessonApplied, setSourceLessonApplied] = useState(false)
   const [showStepErrors, setShowStepErrors] = useState(false)
   const [publishImpactConfirmed, setPublishImpactConfirmed] = useState(false)
 
+  const isEditing = Boolean(persistedLesson)
+  const targetLocked = isEditing
+  const recoveryCopyEnabled = features.drafts && !isEditing
+
   const steps = useMemo(() => getSteps(features.quiz), [features.quiz])
   const currentStepMeta = steps[currentStep]
 
-  const selectedModule = useMemo(
-    () => moduleOptions.find(module => String(module.id) === selectedModuleId) || moduleOptions[0] || null,
-    [moduleOptions, selectedModuleId],
-  )
+  const moduleWindow = useFiveItemWindow({
+    items: moduleOptions,
+    pagination: targetConfig.kind === 'module' ? targetConfig.pagination : null,
+    loading: targetConfig.kind === 'module' ? targetConfig.loading : false,
+    onPageChange: targetConfig.kind === 'module' ? targetConfig.onPageChange : undefined,
+  })
+  const classWindow = useFiveItemWindow({
+    items: targetConfig.kind === 'classroom' ? targetConfig.classes : [],
+    pagination: targetConfig.kind === 'classroom' ? targetConfig.pagination : null,
+    loading: targetConfig.kind === 'classroom' ? targetConfig.loading : false,
+    onPageChange: targetConfig.kind === 'classroom' ? targetConfig.onPageChange : undefined,
+  })
+  const selectedModule = useMemo(() => {
+    const currentPageModule = moduleOptions.find(module => String(module.id) === selectedModuleId)
+    if (currentPageModule) return currentPageModule
+    if (selectedModuleSnapshot && String(selectedModuleSnapshot.id) === selectedModuleId) {
+      return selectedModuleSnapshot
+    }
+    return moduleOptions[0] || null
+  }, [moduleOptions, selectedModuleId, selectedModuleSnapshot])
   const selectedClass = useMemo(
     () => targetConfig.kind === 'classroom'
-      ? targetConfig.classes.find(item => item.id === selectedClassId) || null
+      ? targetConfig.classes.find(item => item.id === selectedClassId)
+        || (selectedClassSnapshot?.id === selectedClassId ? selectedClassSnapshot : null)
       : null,
-    [selectedClassId, targetConfig],
+    [selectedClassId, selectedClassSnapshot, targetConfig],
   )
+  const localDraftKey = targetConfig.kind === 'classroom'
+    ? `${targetConfig.draftKey || 'progyx_teacher_lesson_builder'}:${selectedClassId || 'new'}`
+    : null
   const orderedLessons = useMemo(
     () => [...(selectedModule?.lessons || [])].sort((left, right) => {
       if (left.order_index !== right.order_index) return left.order_index - right.order_index
@@ -418,17 +507,16 @@ export function SharedLessonBuilder({
     }),
     [selectedModule],
   )
+  const selectedModuleLessonCount = selectedModule?.lessons_count
+    ?? selectedModule?.lesson_count
+    ?? orderedLessons.length
   const selectedInsertPosition = Math.min(
-    Math.max(Number(insertPosition) || orderedLessons.length + 1, 1),
-    orderedLessons.length + 1,
+    Math.max(Number(insertPosition) || selectedModuleLessonCount + 1, 1),
+    selectedModuleLessonCount + 1,
   )
   const previousLesson = orderedLessons[selectedInsertPosition - 2] || null
   const nextLesson = orderedLessons[selectedInsertPosition - 1] || null
-  const roadmapVisible = Boolean(
-    mode === 'admin'
-    && selectedModule
-    && (selectedModule.is_published || publishModuleIfNeeded),
-  )
+  const roadmapVisible = false
   const isAdminMode = mode === 'admin'
   const moduleWillBePublished = Boolean(
     isAdminMode
@@ -460,9 +548,34 @@ export function SharedLessonBuilder({
   }, [publishModuleIfNeeded, selectedModuleId])
 
   useEffect(() => {
+    const lesson = editing?.lesson
+    if (!lesson) return
+
+    setPersistedLesson(lesson)
+    setForm(lessonAuthoringToForm(lesson))
+    setCurrentStep(Math.min(lessonAuthoringDraftStep(lesson), steps.length - 1))
+    setShowStepErrors(false)
+    setConflictLesson(null)
+    setSourceLessonApplied(true)
+
+    if (targetConfig.kind === 'classroom') {
+      const classroomId = lesson.module?.custom_classroom_id
+      if (typeof classroomId === 'number') {
+        setSelectedClassId(classroomId)
+        setSelectedClassSnapshot(targetConfig.classes.find(item => item.id === classroomId) ?? null)
+      }
+      return
+    }
+
+    setSelectedModuleId(String(lesson.module?.id || ''))
+    setSelectedModuleSnapshot(lesson.module || null)
+    setInsertPosition(String(lesson.order_index || 1))
+  }, [editing?.lesson?.id, steps.length, targetConfig.kind])
+
+  useEffect(() => {
     if (targetConfig.kind !== 'module') return
 
-    if (!moduleOptions.length) {
+    if (!moduleOptions.length && !selectedModuleSnapshot) {
       setSelectedModuleId('')
       setInsertPosition('1')
       const resetForm = createInitialLessonBuilderForm('middle')
@@ -470,11 +583,13 @@ export function SharedLessonBuilder({
       return
     }
 
-    if (!moduleOptions.some(module => String(module.id) === selectedModuleId)) {
+    if (!selectedModuleId || (!moduleOptions.some(module => String(module.id) === selectedModuleId)
+      && String(selectedModuleSnapshot?.id ?? '') !== selectedModuleId)) {
       setSelectedModuleId(String(moduleOptions[0].id))
-      setInsertPosition(String(moduleOptions[0].lessons.length + 1))
+      setSelectedModuleSnapshot(moduleOptions[0])
+      setInsertPosition(String((moduleOptions[0].lessons_count ?? moduleOptions[0].lesson_count ?? moduleOptions[0].lessons.length) + 1))
     }
-  }, [moduleOptions, selectedModuleId, targetConfig.kind])
+  }, [moduleOptions, selectedModuleId, selectedModuleSnapshot, targetConfig.kind])
 
   useEffect(() => {
     if (targetConfig.kind !== 'module' || !selectedModule) return
@@ -548,11 +663,10 @@ export function SharedLessonBuilder({
   }, [form.practiceFormat, form.checkMode, manualCheckAvailable, textCheckFallback])
 
   useEffect(() => {
-    if (!features.drafts || targetConfig.kind !== 'classroom') return
+    if (!recoveryCopyEnabled || targetConfig.kind !== 'classroom') return
 
-    const draftKey = targetConfig.draftKey || 'progyx_teacher_lesson_builder_v2'
     try {
-      const rawDraft = window.localStorage.getItem(draftKey)
+      const rawDraft = window.localStorage.getItem(localDraftKey!)
       if (!rawDraft) return
       const parsed = JSON.parse(rawDraft) as unknown
       if (!ensureDraftShape(parsed)) return
@@ -564,14 +678,28 @@ export function SharedLessonBuilder({
       }
       showInfoToast('Черновик восстановлен. Можно продолжить с того же шага.')
     } catch {
-      window.localStorage.removeItem(draftKey)
+      window.localStorage.removeItem(localDraftKey!)
     }
-  }, [features.drafts, steps.length, targetConfig])
+  }, [localDraftKey, recoveryCopyEnabled, steps.length, targetConfig.kind])
+
+  // Browser storage remains only an offline recovery copy. It is isolated per
+  // class so drafts cannot silently bleed into another lesson context.
+  useEffect(() => {
+    if (!recoveryCopyEnabled || !localDraftKey) return
+    const timeoutId = window.setTimeout(() => {
+      window.localStorage.setItem(
+        localDraftKey,
+        JSON.stringify({ form, currentStep, selectedClassId }),
+      )
+    }, 800)
+    return () => window.clearTimeout(timeoutId)
+  }, [currentStep, form, localDraftKey, recoveryCopyEnabled, selectedClassId])
 
   useEffect(() => {
     if (
       targetConfig.kind !== 'classroom'
       || !features.sourcePrefill
+      || isEditing
       || !selectedClassId
     ) {
       if (targetConfig.kind === 'classroom') {
@@ -608,12 +736,13 @@ export function SharedLessonBuilder({
     return () => {
       cancelled = true
     }
-  }, [features.sourcePrefill, selectedClassId, targetConfig])
+  }, [features.sourcePrefill, isEditing, selectedClassId, targetConfig])
 
   useEffect(() => {
     if (
       targetConfig.kind !== 'classroom'
       || !features.sourcePrefill
+      || isEditing
       || !targetConfig.sourceLessonId
       || sourceLessonApplied
       || catalogLoading
@@ -622,21 +751,42 @@ export function SharedLessonBuilder({
     }
 
     const sourceLesson = catalog.find(lesson => lesson.id === targetConfig.sourceLessonId)
-    if (!sourceLesson) return
+    if (sourceLesson) {
+      const nextAgeGroup = normalizeAgeGroup(sourceLesson.module_age_group)
+      setForm(current => ({
+        ...current,
+        title: sourceLesson.title,
+        summary: sourceLesson.summary,
+        ageGroup: nextAgeGroup,
+        duration: String(sourceLesson.duration_minutes),
+        passingScore: String(sourceLesson.passing_score),
+        programmingLanguage: defaultLanguageForAgeGroup(nextAgeGroup),
+      }))
+      setSourceLessonApplied(true)
+      showInfoToast(`Черновик заполнен на основе урока «${sourceLesson.title}».`)
+      return
+    }
 
-    const nextAgeGroup = normalizeAgeGroup(sourceLesson.module_age_group)
-    setForm(current => ({
-      ...current,
-      title: sourceLesson.title,
-      summary: sourceLesson.summary,
-      ageGroup: nextAgeGroup,
-      duration: String(sourceLesson.duration_minutes),
-      passingScore: String(sourceLesson.passing_score),
-      programmingLanguage: defaultLanguageForAgeGroup(nextAgeGroup),
-    }))
-    setSourceLessonApplied(true)
-    showInfoToast(`Черновик заполнен на основе урока «${sourceLesson.title}».`)
-  }, [catalog, catalogLoading, features.sourcePrefill, sourceLessonApplied, targetConfig])
+    let cancelled = false
+    api<{ lesson: LessonDetail }>(`/lessons/${targetConfig.sourceLessonId}`, undefined, 'required')
+      .then(result => {
+        if (cancelled) return
+        const nextAgeGroup = normalizeAgeGroup(result.lesson.module.age_group)
+        setForm(current => ({
+          ...current,
+          title: result.lesson.title,
+          summary: result.lesson.summary,
+          ageGroup: nextAgeGroup,
+          duration: String(result.lesson.duration_minutes),
+          passingScore: String(result.lesson.passing_score),
+          programmingLanguage: defaultLanguageForAgeGroup(nextAgeGroup),
+        }))
+        setSourceLessonApplied(true)
+        showInfoToast(`Черновик заполнен на основе урока «${result.lesson.title}».`)
+      })
+      .catch(() => showErrorToast('Не удалось загрузить выбранный урок-основу.'))
+    return () => { cancelled = true }
+  }, [catalog, catalogLoading, features.sourcePrefill, isEditing, sourceLessonApplied, targetConfig])
 
   function updateForm<K extends keyof LessonBuilderForm>(field: K, value: LessonBuilderForm[K]) {
     setForm(current => ({
@@ -645,14 +795,14 @@ export function SharedLessonBuilder({
     }))
   }
 
-  function saveDraft() {
-    if (!features.drafts || targetConfig.kind !== 'classroom') return
-    const draftKey = targetConfig.draftKey || 'progyx_teacher_lesson_builder_v2'
+  function saveRecoveryCopy() {
+    if (!recoveryCopyEnabled || targetConfig.kind !== 'classroom') return
+    if (!localDraftKey) return
     window.localStorage.setItem(
-      draftKey,
+      localDraftKey,
       JSON.stringify({ form, currentStep, selectedClassId }),
     )
-    showSuccessToast('Черновик сохранен на этом устройстве.')
+    showSuccessToast('Резервная копия сохранена только в этом браузере. Для общего черновика используйте «Сохранить черновик».')
   }
 
   function resetFormForCurrentContext(nextInsert = insertPosition) {
@@ -669,7 +819,8 @@ export function SharedLessonBuilder({
   function handleModuleChange(nextModuleId: string) {
     setSelectedModuleId(nextModuleId)
     const nextModule = moduleOptions.find(module => String(module.id) === nextModuleId) || null
-    setInsertPosition(nextModule ? String(nextModule.lessons.length + 1) : '1')
+    setSelectedModuleSnapshot(nextModule)
+    setInsertPosition(nextModule ? String((nextModule.lessons_count ?? nextModule.lesson_count ?? nextModule.lessons.length) + 1) : '1')
   }
 
   function addJudgeTest() {
@@ -823,35 +974,40 @@ export function SharedLessonBuilder({
     }))
   }
 
-  async function handleCreateLesson() {
+  function getTarget(): SharedLessonBuilderTargetSelection | null {
     if (targetConfig.kind === 'classroom' && !selectedClassId) {
       setShowStepErrors(true)
       showInfoToast('Выберите класс, в котором нужно сохранить урок.')
-      return
+      return null
     }
 
     if (targetConfig.kind === 'module' && !selectedModule) {
       setShowStepErrors(true)
       showInfoToast('Сначала создайте хотя бы один обычный модуль для уроков.')
-      return
+      return null
     }
 
+    return targetConfig.kind === 'classroom'
+      ? { kind: 'classroom' as const, classroomId: selectedClassId! }
+      : {
+        kind: 'module' as const,
+        moduleId: selectedModule!.id,
+        insertPosition: Number(insertPosition || orderedLessons.length + 1),
+        publishModuleIfNeeded: false,
+      }
+  }
+
+  function validateFinalLesson() {
     if (!stepComplete('confirm', form, features.quiz)) {
       setShowStepErrors(true)
-      showInfoToast('Перед созданием урока заполните обязательные поля предыдущих шагов.')
-      return
-    }
-
-    if (moduleWillBePublished && !publishImpactConfirmed) {
-      setShowStepErrors(true)
-      showInfoToast('Подтвердите, что публикация откроет весь модуль, а не только этот урок.')
-      return
+      showInfoToast('Перед сохранением заполните обязательные поля предыдущих шагов.')
+      return false
     }
 
     if (form.ageGroup === 'junior' && form.practiceFormat === 'code') {
       setShowStepErrors(true)
       showInfoToast('Для младшей группы кодовая практика недоступна. Выберите текстовое задание.')
-      return
+      return false
     }
 
     if (
@@ -864,61 +1020,140 @@ export function SharedLessonBuilder({
     ) {
       setShowStepErrors(true)
       showInfoToast('Похоже, это кодовая практика. Переключите формат практики на кодовую и добавьте автотесты.')
-      return
+      return false
     }
 
     if (form.practiceFormat === 'code' && !hasCompleteJudgeTest(form.judgeTests)) {
       setShowStepErrors(true)
       showInfoToast('Для кодовой практики нужен хотя бы один автотест с входными данными и ожидаемым результатом.')
-      return
+      return false
     }
 
     if (form.practiceFormat === 'text' && form.checkMode === 'keywords' && !form.answerKeywords.trim()) {
       setShowStepErrors(true)
       showInfoToast('Для автопроверки по ключевым словам добавьте ориентиры ответа.')
-      return
+      return false
     }
 
     if (features.quiz && form.quizEnabled) {
       if (quizPayload.error) {
         setShowStepErrors(true)
         showInfoToast(quizPayload.error)
-        return
+        return false
       }
       if (quizPayload.questions.length === 0) {
         setShowStepErrors(true)
         showInfoToast('Добавьте хотя бы один вопрос в итоговый квиз.')
-        return
+        return false
       }
     }
 
+    return true
+  }
+
+  function getConflictLesson(error: unknown): LessonAuthoringDetail | null {
+    if (!(error instanceof ApiError) || error.status !== 409) return null
+    const payload = error.payload
+    if (!payload || typeof payload !== 'object' || !('lesson' in payload)) return null
+    const lesson = (payload as { lesson?: unknown }).lesson
+    return lesson && typeof lesson === 'object' && 'id' in lesson && 'version' in lesson
+      ? lesson as LessonAuthoringDetail
+      : null
+  }
+
+  function reloadConflictLesson() {
+    if (!conflictLesson) return
+    setPersistedLesson(conflictLesson)
+    setForm(lessonAuthoringToForm(conflictLesson))
+    setCurrentStep(Math.min(lessonAuthoringDraftStep(conflictLesson), steps.length - 1))
+    setConflictLesson(null)
+    setShowStepErrors(false)
+    showInfoToast('Загружена актуальная версия урока. Проверьте изменения и сохраните снова.')
+  }
+
+  async function persistLesson(saveDraft: boolean) {
+    if (conflictLesson) {
+      showInfoToast('Сначала загрузите актуальную версию урока из предупреждения выше.')
+      return
+    }
+
+    const target = getTarget()
+    if (!target) return
+    if (!saveDraft && !validateFinalLesson()) return
+
     const lesson = buildLessonSubmitData(form)
-    const target = targetConfig.kind === 'classroom'
-      ? { kind: 'classroom' as const, classroomId: selectedClassId! as number }
-      : {
-        kind: 'module' as const,
-        moduleId: selectedModule!.id,
-        insertPosition: Number(insertPosition || orderedLessons.length + 1),
-        publishModuleIfNeeded,
-      }
+    const draftPayload = saveDraft
+      ? { form, current_step: currentStep }
+      : undefined
 
     try {
       setCreatingLesson(true)
-      const result = await submitLesson({ target, lesson })
-      setLastCreatedLesson(result.lesson)
+      if (persistedLesson) {
+        if (!updateLesson) {
+          throw new Error('Сохранение изменений для этого урока пока недоступно.')
+        }
+        const updated = await updateLesson({
+          lessonId: persistedLesson.id,
+          version: persistedLesson.version,
+          target,
+          lesson,
+          saveDraft,
+          draftPayload,
+        })
+        setPersistedLesson(updated)
+        setLastCreatedLesson({ id: updated.id, title: updated.title, summary: updated.summary, version: updated.version })
+        setLastCreatedTarget(target)
+        setLastCreatedPublished(updated.status === 'published')
+        if (saveDraft && localDraftKey) window.localStorage.removeItem(localDraftKey)
+        showSuccessToast(
+          saveDraft
+            ? 'Черновик сохранён в общей рабочей зоне. Его можно продолжить на другом устройстве.'
+            : updated.status === 'published'
+              ? 'Изменения сохранены. Урок уже доступен ученикам — проверьте обновления.'
+              : 'Изменения сохранены в черновике.',
+        )
+      } else {
+        const result = await submitLesson({ target, lesson, saveDraft, draftPayload })
+        setLastCreatedLesson(result.lesson)
+        setLastCreatedTarget(target)
+        setLastCreatedPublished(false)
 
-      if (mode === 'admin') {
-        resetFormForCurrentContext(result.nextInsertPosition || insertPosition)
-      } else if (features.drafts && targetConfig.kind === 'classroom') {
-        window.localStorage.removeItem(targetConfig.draftKey || 'progyx_teacher_lesson_builder_v2')
+        if (saveDraft) {
+          if (!result.authoringLesson) {
+            throw new Error('Черновик сохранён, но не удалось получить его актуальную версию. Обновите страницу и продолжите из списка черновиков.')
+          }
+          setPersistedLesson(result.authoringLesson)
+          if (localDraftKey) window.localStorage.removeItem(localDraftKey)
+        } else if (mode === 'admin') {
+          resetFormForCurrentContext(result.nextInsertPosition || insertPosition)
+        } else if (result.authoringLesson) {
+          // A completed teacher lesson remains a server-side draft until it is
+          // explicitly shared. Keep editing that saved row instead of letting
+          // a second click accidentally create a duplicate lesson.
+          setPersistedLesson(result.authoringLesson)
+          if (localDraftKey) window.localStorage.removeItem(localDraftKey)
+        } else if (recoveryCopyEnabled && localDraftKey) {
+          window.localStorage.removeItem(localDraftKey)
+        }
+
+        await onCreated?.(result)
+        showSuccessToast(
+          saveDraft
+            ? 'Черновик сохранён в общей рабочей зоне. Его можно продолжить из списка черновиков.'
+            : result.successMessage,
+        )
       }
 
-      await onCreated?.(result)
-      showSuccessToast(result.successMessage)
       setShowStepErrors(false)
       setPublishImpactConfirmed(false)
     } catch (error) {
-      showErrorToast(error instanceof Error ? error.message : 'Не удалось создать урок.')
+      const latest = getConflictLesson(error)
+      if (latest) {
+        setConflictLesson(latest)
+        showErrorToast('Урок изменён в другой вкладке. Загрузите актуальную версию, чтобы не потерять чужие изменения.')
+      } else {
+        showErrorToast(getApiErrorMessage(error, saveDraft ? 'Не удалось сохранить черновик.' : 'Не удалось сохранить урок.'))
+      }
     } finally {
       setCreatingLesson(false)
     }
@@ -932,7 +1167,7 @@ export function SharedLessonBuilder({
     }
 
     if (currentStep === steps.length - 1) {
-      void handleCreateLesson()
+      void persistLesson(false)
       return
     }
 
@@ -942,6 +1177,43 @@ export function SharedLessonBuilder({
 
   function goBack() {
     setCurrentStep(step => Math.max(step - 1, 0))
+  }
+
+  async function publishCurrentLesson() {
+    try {
+      setPublishingLesson(true)
+      if (persistedLesson && publishSavedLesson) {
+        const target = getTarget()
+        if (!target) return
+        const result = await publishSavedLesson({ lesson: persistedLesson, target })
+        setPersistedLesson(result.lesson)
+        setLastCreatedLesson({
+          id: result.lesson.id,
+          title: result.lesson.title,
+          summary: result.lesson.summary,
+          version: result.lesson.version,
+        })
+        setLastCreatedTarget(target)
+        setLastCreatedPublished(true)
+        showSuccessToast(result.successMessage)
+        return
+      }
+
+      if (!publishCreatedLesson || !lastCreatedLesson || !lastCreatedTarget) return
+      const message = await publishCreatedLesson({ lesson: lastCreatedLesson, target: lastCreatedTarget })
+      setLastCreatedPublished(true)
+      showSuccessToast(message)
+    } catch (error) {
+      const latest = getConflictLesson(error)
+      if (latest) {
+        setConflictLesson(latest)
+        showErrorToast('Урок изменён в другой вкладке. Загрузите актуальную версию перед публикацией.')
+      } else {
+        showErrorToast(getApiErrorMessage(error, 'Не удалось опубликовать урок.'))
+      }
+    } finally {
+      setPublishingLesson(false)
+    }
   }
 
   function renderTargetSection() {
@@ -970,31 +1242,43 @@ export function SharedLessonBuilder({
               </div>
             ) : (
               <p className='mt-3 max-w-md text-sm leading-6 text-slate-600'>
-                Выберите класс справа, и урок сохранится в его библиотеке.
+                {targetLocked
+                  ? 'Урок остаётся в библиотеке исходного класса. Чтобы перенести материал, создайте копию для другого класса.'
+                  : 'Выберите класс справа, и урок сохранится в его библиотеке.'}
               </p>
             )}
           </div>
           <div className='rounded-[24px] border border-slate-200 bg-white/90 p-4'>
-            <label className='text-sm font-semibold text-slate-900'>Класс для сохранения</label>
+            <label className='text-sm font-semibold text-slate-900'>{targetLocked ? 'Класс урока' : 'Класс для сохранения'}</label>
             <select
-              disabled={hasNoClasses}
+              disabled={hasNoClasses || targetLocked}
               className={clsx(
                 'mt-3 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100',
-                hasNoClasses && 'cursor-not-allowed bg-slate-50 text-slate-500',
+                (hasNoClasses || targetLocked) && 'cursor-not-allowed bg-slate-50 text-slate-500',
               )}
               value={selectedClassId ?? ''}
-              onChange={event => setSelectedClassId(event.target.value ? Number(event.target.value) : null)}
+              onChange={event => {
+                const nextId = event.target.value ? Number(event.target.value) : null
+                setSelectedClassId(nextId)
+                setSelectedClassSnapshot(targetConfig.classes.find(item => item.id === nextId) ?? null)
+              }}
             >
               {hasNoClasses ? <option value=''>Нет доступных классов</option> : null}
-              {targetConfig.classes.map(item => (
+              {selectedClass && !classWindow.visibleItems.some(item => item.id === selectedClass.id) ? (
+                <option value={selectedClass.id}>{selectedClass.name}</option>
+              ) : null}
+              {classWindow.visibleItems.map(item => (
                 <option key={item.id} value={item.id}>
                   {item.name}
                 </option>
               ))}
             </select>
+            {!targetLocked ? <FiveItemPager window={classWindow} loading={targetConfig.loading} itemLabel='классов' className='mt-3' /> : null}
             <p className='mt-2 text-xs leading-5 text-slate-500'>
               {selectedClass
-                ? `Урок будет создан в библиотеке класса «${selectedClass.name}».`
+                ? targetLocked
+                  ? `Урок уже находится в библиотеке класса «${selectedClass.name}».`
+                  : `Урок будет создан в библиотеке класса «${selectedClass.name}».`
                 : 'Сначала создайте или выберите класс в кабинете учителя.'}
             </p>
           </div>
@@ -1002,7 +1286,7 @@ export function SharedLessonBuilder({
       )
     }
 
-    if (!moduleOptions.length) {
+    if (!moduleOptions.length && !selectedModule) {
       return (
         <div className='rounded-[24px] border border-dashed border-slate-300 bg-slate-50 p-5 text-sm leading-6 text-slate-600'>
           Сначала создайте обычный модуль в соседней секции админки. После этого сюда можно будет добавить урок для учебной карты, практику и итоговый квиз.
@@ -1015,10 +1299,11 @@ export function SharedLessonBuilder({
         <div className='rounded-[28px] border border-slate-200 bg-white/95 p-5 shadow-[0_18px_45px_rgba(15,23,42,0.06)] sm:p-6'>
           <div className='flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between'>
             <div className='min-w-0'>
-              <p className='text-sm font-semibold text-slate-900'>Цель админского урока</p>
+              <p className='text-sm font-semibold text-slate-900'>{targetLocked ? 'Расположение урока' : 'Цель админского урока'}</p>
               <p className='mt-3 max-w-2xl text-sm leading-6 text-slate-600'>
-                Эти настройки применятся до шага 1: модуль задает возраст, позиция управляет порядком,
-                а публикация влияет на видимость всего модуля.
+                {targetLocked
+                  ? 'Модуль и позиция фиксированы для этого урока. Изменяйте содержание, а перенос выполните отдельной операцией в каталоге модулей.'
+                  : 'Эти настройки применятся до шага 1: модуль задает возраст, а позиция управляет порядком. Новый урок всегда сначала сохраняется как приватный черновик.'}
               </p>
             </div>
             <span
@@ -1035,30 +1320,46 @@ export function SharedLessonBuilder({
             <label>
               <span className='text-sm font-semibold text-slate-900'>Модуль</span>
               <select
-                className='mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100'
+                disabled={targetLocked}
+                className={clsx(
+                  'mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100',
+                  targetLocked && 'cursor-not-allowed bg-slate-50 text-slate-500',
+                )}
                 value={selectedModuleId}
                 onChange={event => handleModuleChange(event.target.value)}
               >
-                {moduleOptions.map(module => (
+                {selectedModule && !moduleWindow.visibleItems.some(module => module.id === selectedModule.id) ? (
+                  <option value={selectedModule.id}>{selectedModule.title} ({getAgeGroupLabel(selectedModule.age_group)})</option>
+                ) : null}
+                {moduleWindow.visibleItems.map(module => (
                   <option key={module.id} value={module.id}>
                     {module.title} ({getAgeGroupLabel(module.age_group)})
                   </option>
                 ))}
               </select>
+              {!targetLocked && targetConfig.kind === 'module' ? (
+                <FiveItemPager window={moduleWindow} loading={targetConfig.loading} itemLabel='модулей' className='mt-3' />
+              ) : null}
             </label>
             <label>
               <span className='text-sm font-semibold text-slate-900'>Позиция урока</span>
               <select
-                className='mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100'
+                disabled={targetLocked}
+                className={clsx(
+                  'mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100',
+                  targetLocked && 'cursor-not-allowed bg-slate-50 text-slate-500',
+                )}
                 value={insertPosition}
                 onChange={event => setInsertPosition(event.target.value)}
               >
-                {Array.from({ length: orderedLessons.length + 1 }, (_, index) => {
+                {Array.from({ length: selectedModuleLessonCount + 1 }, (_, index) => {
                   const position = index + 1
                   const lessonBefore = orderedLessons[position - 2]
                   const label = position === 1
                     ? '1. В начало модуля'
-                    : `${position}. После «${lessonBefore?.title || 'предыдущего урока'}»`
+                    : lessonBefore
+                      ? `${position}. После «${lessonBefore.title}»`
+                      : `${position}. Позиция в модуле`
                   return (
                     <option key={position} value={position}>
                       {label}
@@ -1112,9 +1413,7 @@ export function SharedLessonBuilder({
                   Сейчас модуль {selectedModule?.is_published ? 'опубликован' : 'скрыт от учеников'}.
                 </p>
                 <p className='mt-2 font-semibold text-slate-900'>
-                  {roadmapVisible
-                    ? 'После создания урок попадет в опубликованную учебную карту.'
-                    : 'После создания урок останется скрытым до публикации модуля.'}
+                  Новый урок останется черновиком, даже если модуль уже опубликован.
                 </p>
               </div>
 
@@ -1196,7 +1495,7 @@ export function SharedLessonBuilder({
             ) : null}
           </div>
 
-          {mode === 'teacher' ? (
+          {mode === 'teacher' && !targetLocked ? (
             <div className='rounded-[24px] border border-slate-200 bg-slate-50/70 p-4 sm:p-5'>
               <LabelBlock label='Для кого урок' required />
               <div className='mt-3 grid gap-3 sm:grid-cols-3'>
@@ -1232,7 +1531,9 @@ export function SharedLessonBuilder({
             <div className='rounded-[24px] border border-slate-200 bg-slate-50/70 p-4 sm:p-5'>
               <LabelBlock label='Возрастная группа' required />
               <div className='mt-3 rounded-2xl border border-slate-200 bg-white px-4 py-4 text-sm leading-6 text-slate-700'>
-            Для урока в учебной карте возрастная группа берется из выбранного модуля.
+                {mode === 'teacher'
+                  ? 'Возрастная группа закреплена модулем этого класса и не меняется при редактировании урока.'
+                  : 'Для урока в учебной карте возрастная группа берется из выбранного модуля.'}
                 <span className='mt-2 block text-base font-semibold text-slate-900'>
                   {AGE_GROUP_OPTIONS.find(option => option.value === form.ageGroup)?.label || form.ageGroup}
                 </span>
@@ -1245,18 +1546,18 @@ export function SharedLessonBuilder({
               <LabelBlock label='Длительность урока' required />
               <div className='mt-3 flex items-center gap-3'>
                 <input
-                  aria-invalid={showStepErrors && !form.duration.trim()}
+                  aria-invalid={showStepErrors && !isIntegerInRange(form.duration, 1, 480)}
                   className={clsx(
                     'w-full rounded-2xl border bg-white px-4 py-3 text-base text-slate-900 outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100',
-                    showStepErrors && !form.duration.trim() ? 'border-rose-300 bg-rose-50' : 'border-slate-200',
+                    showStepErrors && !isIntegerInRange(form.duration, 1, 480) ? 'border-rose-300 bg-rose-50' : 'border-slate-200',
                   )}
                   value={form.duration}
                   onChange={event => updateForm('duration', event.target.value.replace(/[^\d]/g, ''))}
                 />
                 <span className='rounded-full bg-white px-3 py-2 text-sm font-medium text-slate-500'>мин</span>
               </div>
-              {showStepErrors && !form.duration.trim() ? (
-                <InlineError>Укажите длительность урока.</InlineError>
+              {showStepErrors && !isIntegerInRange(form.duration, 1, 480) ? (
+                <InlineError>Укажите длительность целым числом от 1 до 480 минут.</InlineError>
               ) : null}
             </div>
 
@@ -1283,7 +1584,7 @@ export function SharedLessonBuilder({
             <div className='mt-3 flex flex-wrap items-center gap-3'>
               <div className='inline-flex items-center rounded-2xl border border-slate-200 bg-white px-4 py-3'>
                 <input
-                  aria-invalid={showStepErrors && !form.passingScore.trim()}
+                  aria-invalid={showStepErrors && !isIntegerInRange(form.passingScore, 0, 100)}
                   className='w-14 border-none bg-transparent text-base font-semibold text-slate-900 outline-none'
                   value={form.passingScore}
                   onChange={event => updateForm('passingScore', event.target.value.replace(/[^\d]/g, ''))}
@@ -1318,8 +1619,8 @@ export function SharedLessonBuilder({
                 </div>
               </div>
             ) : null}
-            {showStepErrors && !form.passingScore.trim() ? (
-              <InlineError>Укажите минимальный процент прохождения.</InlineError>
+            {showStepErrors && !isIntegerInRange(form.passingScore, 0, 100) ? (
+              <InlineError>Укажите минимальный процент целым числом от 0 до 100.</InlineError>
             ) : null}
           </div>
         </div>
@@ -1713,14 +2014,25 @@ export function SharedLessonBuilder({
                         </button>
                       ) : null}
                     </div>
+                    <label className='mt-3 flex items-start gap-3 rounded-2xl bg-white px-4 py-3 text-sm text-slate-700'>
+                      <input
+                        type='checkbox'
+                        className='mt-0.5 size-4 accent-sky-600'
+                        checked={testCase.isPublic}
+                        onChange={event => updateJudgeTest(index, { isPublic: event.target.checked })}
+                      />
+                      <span>
+                        Показывать ученику после отправки: входные данные, ожидаемый и фактический вывод
+                      </span>
+                    </label>
                     <div className='mt-4 grid gap-4 lg:grid-cols-2'>
                       <div>
-                        <LabelBlock label='Входные данные' required />
+                        <LabelBlock label='Входные данные (можно оставить пустыми)' />
                         <textarea
-                          aria-invalid={showStepErrors && !testCase.input.trim() && !hasCompleteJudgeTest(form.judgeTests)}
+                          aria-invalid={false}
                           className={clsx(
                             'mt-3 min-h-[120px] w-full rounded-2xl border bg-white px-4 py-3 font-mono text-sm text-slate-900 outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100',
-                            showStepErrors && !testCase.input.trim() && !hasCompleteJudgeTest(form.judgeTests) ? 'border-rose-300 bg-rose-50' : 'border-slate-200',
+                            'border-slate-200',
                           )}
                           value={testCase.input}
                           onChange={event => updateJudgeTest(index, { input: event.target.value })}
@@ -2073,7 +2385,9 @@ export function SharedLessonBuilder({
         <header className='space-y-2'>
           <h2 className='text-[clamp(1.45rem,3vw,1.85rem)] font-bold text-slate-900'>Шаг 7. Финальная проверка</h2>
           <p className='max-w-3xl text-sm leading-6 text-slate-600 md:text-base'>
-            Проверьте, что урок собран полностью и сохраняется в нужный класс или модуль учебной карты.
+            {isEditing
+              ? 'Проверьте изменения перед сохранением. Урок останется в своём исходном классе или модуле.'
+              : 'Проверьте, что урок собран полностью и сохраняется в нужный класс или модуль учебной карты.'}
           </p>
         </header>
 
@@ -2134,10 +2448,14 @@ export function SharedLessonBuilder({
               <div className='mt-5 rounded-[22px] border border-slate-200 bg-slate-50/70 p-4 text-sm leading-7 text-slate-700'>
                 {targetConfig.kind === 'classroom'
                   ? selectedClass
-                    ? `Урок сохранится в библиотеке класса «${selectedClass.name}». Его можно будет открыть сразу после создания и позже назначить ученикам.`
+                    ? isEditing
+                      ? `Урок останется в библиотеке класса «${selectedClass.name}».`
+                      : `Урок сохранится в библиотеке класса «${selectedClass.name}». Его можно будет открыть сразу после создания и позже назначить ученикам.`
                     : 'Класс пока не выбран. Сначала создайте или выберите класс.'
                   : selectedModule
-                    ? `Урок попадет в модуль «${selectedModule.title}» на позицию ${insertPosition}. ${roadmapVisible ? 'После создания он сразу будет виден в разделе уроков.' : 'Он сохранится, но останется скрытым до публикации модуля.'}`
+                    ? isEditing
+                      ? `Урок останется в модуле «${selectedModule.title}» на позиции ${insertPosition}.`
+                      : `Урок попадет в модуль «${selectedModule.title}» на позицию ${insertPosition} как приватный черновик. Опубликуйте его отдельным действием после проверки.`
                     : 'Модуль пока не выбран. Сначала создайте хотя бы один модуль учебной карты.'}
               </div>
             </div>
@@ -2161,9 +2479,13 @@ export function SharedLessonBuilder({
               ))}
             </ul>
             <div className='mt-5 rounded-[22px] border border-sky-100 bg-sky-50/70 px-4 py-4 text-sm leading-6 text-slate-700'>
-              {mode === 'teacher'
+              {isEditing && persistedLesson?.is_published
+                ? 'Этот урок уже виден ученикам. После сохранения обновлённое содержание станет доступно без дополнительной публикации.'
+                : isEditing
+                  ? 'Сохранение оставит урок черновиком. Когда он будет готов, откройте его отдельным действием.'
+                  : mode === 'teacher'
                 ? 'После создания урок можно будет сразу открыть, а затем при необходимости назначить классу отдельным заданием.'
-                : 'После создания урок останется в выбранном модуле учебной карты. Публикация модуля и позиция вставки уже учтены.'}
+                : 'После создания урок сохранится черновиком в выбранном модуле. Публикация урока выполняется отдельным действием после проверки.'}
             </div>
           </div>
         </div>
@@ -2210,7 +2532,7 @@ export function SharedLessonBuilder({
                     <ChevronRight className='h-4 w-4' />
                     <span>Уроки</span>
                     <ChevronRight className='h-4 w-4' />
-                    <span className='font-semibold text-slate-900'>Создание урока</span>
+                    <span className='font-semibold text-slate-900'>{isEditing ? 'Редактирование урока' : 'Создание урока'}</span>
                   </nav>
                 ) : (
                   <div className='inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1.5 text-sm font-medium text-slate-600'>
@@ -2224,10 +2546,14 @@ export function SharedLessonBuilder({
                     Шаг {currentStep + 1} из {steps.length}
                   </div>
                   <h1 className='text-[clamp(2rem,4.8vw,3.4rem)] font-black tracking-[-0.04em] text-slate-900'>
-                    {mode === 'teacher' ? 'Создание авторского урока' : 'Создание урока для учебной карты'}
+                    {isEditing
+                      ? mode === 'teacher' ? 'Редактирование авторского урока' : 'Редактирование урока учебной карты'
+                      : mode === 'teacher' ? 'Создание авторского урока' : 'Создание урока для учебной карты'}
                   </h1>
                   <p className='max-w-2xl text-base leading-7 text-slate-600 md:text-lg'>
-                    {mode === 'teacher'
+                    {isEditing && persistedLesson?.is_published
+                      ? 'Урок уже опубликован. Сохранённые изменения увидят ученики, которым он доступен.'
+                      : mode === 'teacher'
                       ? 'Соберите урок по шагам: тема, содержание, практика, проверка и итоговый квиз.'
                       : 'Один общий конструктор для админа и суперадмина: выберите модуль, позицию урока, настройте практику и итоговый квиз.'}
                   </p>
@@ -2247,14 +2573,37 @@ export function SharedLessonBuilder({
               </div>
 
               <div className='flex flex-wrap items-center gap-3 xl:max-w-[31rem] xl:justify-end'>
-                {features.drafts ? (
+                <button
+                  type='button'
+                  className='inline-flex min-h-11 items-center justify-center gap-2 rounded-full bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-wait disabled:opacity-60'
+                  disabled={creatingLesson || Boolean(conflictLesson)}
+                  onClick={() => void persistLesson(persistedLesson?.is_published ? false : true)}
+                >
+                  <Save className='h-4 w-4' />
+                  {creatingLesson
+                    ? 'Сохраняем…'
+                    : persistedLesson?.is_published
+                      ? 'Сохранить изменения'
+                      : 'Сохранить черновик'}
+                </button>
+                {recoveryCopyEnabled ? (
                   <button
                     type='button'
                     className='inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:border-slate-300'
-                    onClick={saveDraft}
+                    onClick={saveRecoveryCopy}
                   >
                     <Save className='h-4 w-4' />
-                    Сохранить черновик
+                    Резервная копия браузера
+                  </button>
+                ) : null}
+                {persistedLesson && !persistedLesson.is_published && publishSavedLesson ? (
+                  <button
+                    type='button'
+                    className='inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-4 text-sm font-semibold text-sky-800 transition hover:border-sky-300 disabled:cursor-wait disabled:opacity-60'
+                    disabled={publishingLesson || Boolean(conflictLesson)}
+                    onClick={() => void publishCurrentLesson()}
+                  >
+                    {publishingLesson ? 'Публикуем…' : mode === 'teacher' ? 'Открыть классу' : 'Опубликовать'}
                   </button>
                 ) : null}
                 {features.help ? (
@@ -2280,19 +2629,57 @@ export function SharedLessonBuilder({
 
             {renderTargetSection()}
 
+            {conflictLesson ? (
+              <div className='flex flex-wrap items-center justify-between gap-4 rounded-[24px] border border-amber-300 bg-amber-50 px-4 py-4 text-sm leading-6 text-amber-950'>
+                <div>
+                  <p className='font-bold'>Урок изменён в другой вкладке</p>
+                  <p className='mt-1'>Загрузите актуальную версию перед следующим сохранением, чтобы не перезаписать чужие правки.</p>
+                </div>
+                <button
+                  type='button'
+                  onClick={reloadConflictLesson}
+                  className='inline-flex min-h-10 shrink-0 items-center justify-center rounded-full bg-amber-800 px-4 text-sm font-semibold text-white'
+                >
+                  Загрузить актуальную версию
+                </button>
+              </div>
+            ) : null}
+
             {lastCreatedLesson ? (
               <div className='flex flex-wrap items-center justify-between gap-4 rounded-[24px] border border-emerald-200 bg-white px-4 py-4'>
                 <div>
-                  <p className='text-sm font-semibold text-emerald-700'>Последний созданный урок</p>
+                  <p className='text-sm font-semibold text-emerald-700'>{lastCreatedPublished ? 'Опубликованный урок' : 'Сохранённый черновик'}</p>
                   <p className='mt-1 text-lg font-bold text-slate-900'>{lastCreatedLesson.title}</p>
                   <p className='mt-1 text-sm leading-6 text-slate-600'>{lastCreatedLesson.summary}</p>
                 </div>
-                <Link
-                  href={`/lessons/${lastCreatedLesson.id}`}
-                  className='inline-flex min-h-11 items-center justify-center rounded-full bg-slate-900 px-5 text-sm font-semibold text-white'
-                >
-                  Открыть урок
-                </Link>
+                <div className='flex flex-wrap gap-2'>
+                  {!lastCreatedPublished && (publishCreatedLesson || publishSavedLesson) ? (
+                    <button
+                      type='button'
+                      className='inline-flex min-h-11 items-center justify-center rounded-full bg-sky-600 px-5 text-sm font-semibold text-white disabled:cursor-wait disabled:opacity-70'
+                      disabled={publishingLesson}
+                      onClick={() => void publishCurrentLesson()}
+                    >
+                      {publishingLesson ? 'Публикуем…' : mode === 'teacher' ? 'Открыть классу' : 'Опубликовать урок'}
+                    </button>
+                  ) : null}
+                  {lastCreatedPublished ? (
+                    <Link
+                      href={`/lessons/${lastCreatedLesson.id}`}
+                      className='inline-flex min-h-11 items-center justify-center rounded-full bg-slate-900 px-5 text-sm font-semibold text-white'
+                    >
+                      Открыть урок
+                    </Link>
+                  ) : null}
+                  {!lastCreatedPublished && lessonListHref ? (
+                    <Link
+                      href={lessonListHref}
+                      className='inline-flex min-h-11 items-center justify-center rounded-full border border-slate-200 bg-white px-5 text-sm font-semibold text-slate-700'
+                    >
+                      К списку черновиков
+                    </Link>
+                  ) : null}
+                </div>
               </div>
             ) : null}
           </div>
@@ -2443,7 +2830,12 @@ export function SharedLessonBuilder({
                 onClick={goNext}
                 disabled={creatingLesson}
               >
-                {creatingLesson ? 'Создаем...' : nextButtonLabel(currentStep, steps)}
+                {creatingLesson
+                  ? 'Сохраняем...'
+                  : nextButtonLabel(currentStep, steps, {
+                    editing: isEditing,
+                    draft: persistedLesson?.status === 'draft',
+                  })}
                 {creatingLesson ? null : <ArrowRight className='h-4 w-4' />}
               </button>
             </div>

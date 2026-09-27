@@ -15,9 +15,15 @@ from __future__ import annotations
 import re
 
 from flask import Blueprint, request
-from sqlalchemy import or_
+from sqlalchemy import String, cast, or_
 
 from ..core.db import db
+from ..core.pagination import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    paginate_query,
+    pagination_params,
+)
 from ..core.security import auth_required
 from ..models.media import MEDIA_KIND_ASSIGNMENT_COVER, MediaAsset
 from ..models.useful import (
@@ -33,8 +39,6 @@ useful_bp = Blueprint('useful', __name__)
 
 
 SLUG_RE = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*')
-DEFAULT_PAGE_SIZE = 20
-MAX_PAGE_SIZE = 100
 
 
 def _safe_int(value, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
@@ -75,7 +79,7 @@ def _validate_image(image_id) -> tuple[int | None, tuple[dict, int] | None]:
         parsed = int(image_id)
     except (TypeError, ValueError):
         return None, ({'message': 'Некорректный image_id.'}, 400)
-    media = MediaAsset.query.get(parsed)
+    media = db.session.get(MediaAsset, parsed)
     if media is None or media.kind != MEDIA_KIND_ASSIGNMENT_COVER:
         return None, ({'message': 'Изображение не найдено.'}, 404)
     return parsed, None
@@ -87,10 +91,9 @@ def _filter_age_group(query, raw_value: str | None):
     normalized = raw_value.strip().lower()
     if normalized not in VALID_USEFUL_AGE_GROUPS:
         return query
-    # The SQLite test backend uses JSON variant where containment is not portable;
-    # do the filter in Python after fetching all rows for this single-value lookup.
-    # For the current expected scale (curated dozens), this is fine.
-    return query
+    # Quoted JSON string matching is portable across PostgreSQL JSONB and the
+    # SQLite JSON variant used in tests, and keeps filtering ahead of pagination.
+    return query.filter(cast(UsefulTask.age_groups, String).like(f'%"{normalized}"%'))
 
 
 def _python_filter_age_group(items: list[UsefulTask], raw_value: str | None) -> list[UsefulTask]:
@@ -137,9 +140,11 @@ def list_useful(current_user: User):
     topic = (request.args.get('topic') or '').strip().lower() or None
     difficulty = (request.args.get('difficulty') or '').strip().lower() or None
     search = (request.args.get('q') or '').strip()
-    limit = _safe_int(request.args.get('limit'), DEFAULT_PAGE_SIZE, minimum=1, maximum=MAX_PAGE_SIZE)
+    page, page_size = pagination_params(request.args)
+    if 'page_size' not in request.args and 'limit' in request.args:
+        page_size = _safe_int(request.args.get('limit'), DEFAULT_PAGE_SIZE, minimum=1, maximum=MAX_PAGE_SIZE)
 
-    query = UsefulTask.query.filter_by(is_published=True)
+    query = _filter_age_group(UsefulTask.query.filter_by(is_published=True), age_group)
     if topic:
         query = query.filter(UsefulTask.topic == topic)
     if difficulty in {'easy', 'medium', 'hard'}:
@@ -148,12 +153,11 @@ def list_useful(current_user: User):
         like = f'%{search}%'
         query = query.filter(or_(UsefulTask.title.ilike(like), UsefulTask.summary.ilike(like)))
     query = query.order_by(UsefulTask.created_at.desc(), UsefulTask.id.desc())
-    items = query.limit(MAX_PAGE_SIZE).all()
-    items = _python_filter_age_group(items, age_group)
-    items = items[:limit]
+    items, pagination = paginate_query(query, page=page, page_size=page_size)
     return {
         'tasks': _list_payload(items),
-        'total': len(items),
+        'total': pagination['total'],
+        'pagination': pagination,
         'filters': {
             'age_group': age_group,
             'topic': topic,
@@ -182,8 +186,13 @@ def detail_useful(current_user: User, slug: str):
 @useful_bp.get('/admin')
 @auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
 def admin_list_useful(current_user: User):
-    items = UsefulTask.query.order_by(UsefulTask.created_at.desc(), UsefulTask.id.desc()).limit(MAX_PAGE_SIZE).all()
-    return {'tasks': [item.to_dict(include_body=True) for item in items]}
+    page, page_size = pagination_params(request.args)
+    query = UsefulTask.query.order_by(UsefulTask.created_at.desc(), UsefulTask.id.desc())
+    items, pagination = paginate_query(query, page=page, page_size=page_size)
+    return {
+        'tasks': [item.to_dict(include_body=True) for item in items],
+        'pagination': pagination,
+    }
 
 
 @useful_bp.post('/admin')
@@ -222,7 +231,7 @@ def admin_create_useful(current_user: User):
 @useful_bp.patch('/admin/<int:task_id>')
 @auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
 def admin_update_useful(current_user: User, task_id: int):
-    task = UsefulTask.query.get_or_404(task_id)
+    task = db.get_or_404(UsefulTask, task_id)
     data = request.get_json(silent=True) or {}
     if 'title' in data:
         title = str(data.get('title') or '').strip()
@@ -261,7 +270,7 @@ def admin_update_useful(current_user: User, task_id: int):
 @useful_bp.delete('/admin/<int:task_id>')
 @auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
 def admin_delete_useful(current_user: User, task_id: int):
-    task = UsefulTask.query.get_or_404(task_id)
+    task = db.get_or_404(UsefulTask, task_id)
     _log_admin_useful_action(current_user, action='useful_task_deleted', task=task)
     db.session.delete(task)
     db.session.commit()

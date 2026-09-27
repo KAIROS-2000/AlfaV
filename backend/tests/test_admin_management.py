@@ -34,18 +34,24 @@ class AdminManagementRegressionTests(unittest.TestCase):
         self._tempdirs.append(tempdir)
         database_path = Path(tempdir.name) / 'test.db'
         env = {
+            'CODEQUEST_SKIP_DOTENV': 'true',
             'APP_ENV': 'development',
             'SECRET_KEY': 'UnitTestSecretKey123!UnitTestSecretKey123!',
             'DATABASE_URL': f'sqlite:///{database_path.as_posix()}',
             'CLIENT_URL': 'http://localhost:3000',
+            'LEGAL_DOCUMENTS_VERSION': 'test-legal-v1',
             'ENABLE_DEMO_DATA': 'false',
             'SUPERADMIN_BOOTSTRAP': 'false',
             'SESSION_COOKIE_SECURE': 'false',
             'GIGACHAT_VERIFY_SSL': 'true',
             'METRICS_DEBUG': 'false',
+            'SEND_MAIL': 'false',
+            'REDIS_URL': '',
+            'REDIS_PASSWORD': '',
+            'READINESS_REQUIRE_REDIS': 'false',
         }
 
-        with patch.dict(os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=True):
             import app.core.config as config_module
             import app as app_module
 
@@ -176,6 +182,10 @@ class AdminManagementRegressionTests(unittest.TestCase):
                     'phone': '+7 912 345-67-89',
                     'password': 'TeacherPass123!',
                     'role': 'teacher',
+                    'privacy_accepted': True,
+                    'terms_accepted': True,
+                    'personal_data_accepted': True,
+                    'legal_documents_version': 'test-legal-v1',
                 },
             )
             self.assertEqual(register_response.status_code, 201)
@@ -253,6 +263,10 @@ class AdminManagementRegressionTests(unittest.TestCase):
                     'phone': '+7 912 345-67-90',
                     'password': 'TeacherPass123!',
                     'role': 'teacher',
+                    'privacy_accepted': True,
+                    'terms_accepted': True,
+                    'personal_data_accepted': True,
+                    'legal_documents_version': 'test-legal-v1',
                 },
             )
             self.assertEqual(register_response.status_code, 201)
@@ -305,6 +319,10 @@ class AdminManagementRegressionTests(unittest.TestCase):
                     'phone': '+7 912 345-67-90',
                     'password': 'TeacherPass123!',
                     'role': 'teacher',
+                    'privacy_accepted': True,
+                    'terms_accepted': True,
+                    'personal_data_accepted': True,
+                    'legal_documents_version': 'test-legal-v1',
                 },
             )
             self.assertEqual(register_again.status_code, 201)
@@ -1227,6 +1245,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             r_sort = client.get('/api/admin/audit-logs?sort=action&order=asc&page=1&page_size=20')
             self.assertEqual(r_sort.status_code, 200)
             self.assertEqual(r_sort.get_json()['filters']['sort'], 'action')
+            self.assertEqual(r_sort.get_json()['pagination']['page_size'], 15)
 
             r_actor = client.get('/api/admin/audit-logs?actor_login=zeta&sort=email&order=desc')
             self.assertEqual(r_actor.status_code, 200)
@@ -1238,6 +1257,7 @@ class AdminManagementRegressionTests(unittest.TestCase):
             self.assertEqual(r_act.status_code, 200)
             body = r_act.get_json()
             self.assertEqual(body['pagination']['total'], 1)
+            self.assertEqual(body['pagination']['page_size'], 15)
             self.assertEqual(body['site_activity_logs'][0]['path'], '/api/teacher/modules')
             self.assertEqual(body['site_activity_logs'][0]['user_id'], admin_id)
             self.assertEqual(body['filters']['sort'], 'path')

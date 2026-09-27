@@ -360,8 +360,42 @@ export interface LessonSummary {
   module_title?: string
   is_custom?: boolean
   custom_classroom_id?: number | null
+  /** Lifecycle fields are included for staff authoring lists. */
+  is_published?: boolean
+  status?: LessonLifecycleStatus
+  updated_at?: string | null
+  published_at?: string | null
+  archived_at?: string | null
+  version?: number
   state?: 'completed' | 'current' | 'locked' | 'open'
   progress?: ProgressItem | null
+}
+
+export type LessonLifecycleStatus = 'draft' | 'published' | 'archived'
+
+/**
+ * A compact staff-only item returned by the lesson lifecycle list endpoints.
+ * It deliberately has no student-facing URL: drafts must only be opened in
+ * the authoring workflow.
+ */
+export interface LessonAuthoringListItem extends LessonSummary {
+  status: LessonLifecycleStatus
+  is_published: boolean
+  updated_at: string | null
+  published_at: string | null
+  archived_at: string | null
+  version: number
+  module_id?: number
+  module_slug?: string
+  module_age_group?: 'junior' | 'middle' | 'senior'
+  module_is_published?: boolean
+  classroom_id?: number | null
+  classroom_name?: string | null
+}
+
+export interface LessonLifecycleListResponse {
+  lessons: LessonAuthoringListItem[]
+  pagination: PaginationMeta
 }
 
 export interface ProgressItem {
@@ -389,6 +423,18 @@ export interface ModuleItem {
   is_custom_classroom_module?: boolean
   custom_classroom_id?: number | null
   lessons: LessonSummary[]
+  /** Server summaries can omit the full lesson array when it is paginated. */
+  lessons_count?: number
+  lesson_count?: number
+}
+
+export interface AdminModulesResponse {
+  modules: ModuleItem[]
+  pagination: PaginationMeta
+  stats?: {
+    total: number
+    published: number
+  }
 }
 
 export interface TheoryBlock {
@@ -414,7 +460,16 @@ export interface TaskItem {
     runner?: 'stdin_stdout' | null
     language?: CodeTaskLanguage | null
     keywords?: string[]
+    require_all_keywords?: boolean
+    minimum_answer_length?: number
     tests_count?: number
+    /** Present on staff authoring endpoints; omitted from student payloads. */
+    tests?: Array<{
+      label?: string
+      input: string
+      expected: string
+      is_public?: boolean
+    }>
     time_limit_ms?: number | null
     memory_limit_mb?: number | null
   }
@@ -447,6 +502,9 @@ export interface JudgeReport {
   runtime_error?: string | null
   keyword_matches?: string[]
   missing_keywords?: string[]
+  require_all_keywords?: boolean
+  answer_length?: number | null
+  minimum_answer_length?: number | null
   time_limit_ms?: number | null
   memory_limit_mb?: number | null
 }
@@ -479,23 +537,24 @@ export interface LessonDetail extends LessonSummary {
   quizzes: QuizItem[]
 }
 
-export type LessonChatRole = 'user' | 'assistant'
-
-export interface LessonChatMessage {
-  role: LessonChatRole
-  content: string
-}
-
-export interface LessonChatUsage {
-  prompt_tokens?: number
-  completion_tokens?: number
-  total_tokens?: number
-}
-
-export interface LessonGigaChatResponse {
-  message: LessonChatMessage
-  model?: string | null
-  usage?: LessonChatUsage | null
+/** Full private lesson representation used by the staff lesson editor. */
+export interface LessonAuthoringDetail extends LessonDetail {
+  is_published: boolean
+  status: LessonLifecycleStatus
+  authoring_metadata: {
+    format_note?: string
+  }
+  format_note?: string
+  created_by_id: number | null
+  updated_at: string | null
+  published_at: string | null
+  archived_at: string | null
+  version: number
+  /** Opaque staff-only recovery of an intentionally incomplete server draft. */
+  draft_payload?: {
+    form?: Record<string, unknown>
+    current_step?: number
+  } | null
 }
 
 export interface DashboardData {
@@ -518,6 +577,7 @@ export interface DashboardData {
 export interface AuthOptions {
   roles: string[]
   age_groups: string[]
+  parent_password_required?: boolean
 }
 
 export interface ClassroomItem {
@@ -615,6 +675,12 @@ export interface TeacherOverviewData {
     submissions: number
   }
   classes: ClassroomItem[]
+  classes_pagination: PaginationMeta
+}
+
+export interface TeacherClassesResponse {
+  classes: ClassroomItem[]
+  pagination: PaginationMeta
 }
 
 export type ClassJoinRequestStatus = 'pending' | 'approved' | 'rejected'
@@ -635,6 +701,7 @@ export interface ClassJoinRequestItem {
 
 export interface TeacherJoinRequestsResponse {
   requests: ClassJoinRequestItem[]
+  pagination: PaginationMeta
 }
 
 export interface TeacherPracticeHeatmapRow {
@@ -666,8 +733,35 @@ export interface TeacherClassDetail {
     average_score: number
   }>
   assignments: AssignmentItem[]
+  students_pagination: PaginationMeta
+  assignments_pagination: PaginationMeta
+  assignment_summary?: {
+    pending_submissions: number
+    reviewed_submissions: number
+    overdue_assignments: number
+  }
   /** Present when API returns aggregated practice stats for the class */
   practice_heatmap?: TeacherPracticeHeatmap
+}
+
+export interface TeacherAssignmentsResponse {
+  assignments: AssignmentItem[]
+  pagination: PaginationMeta
+}
+
+export interface TeacherSubmissionsResponse {
+  assignment: AssignmentItem
+  submissions: SubmissionItem[]
+  pagination: PaginationMeta
+}
+
+export interface TeacherLessonCatalogResponse {
+  lessons: LessonCatalogItem[]
+  pagination: PaginationMeta
+  filters: {
+    source: 'all' | LessonCatalogItem['source']
+    q: string
+  }
 }
 
 export type MessagingRole = 'student' | 'teacher' | 'parent'
@@ -826,6 +920,7 @@ export interface BugHunterMyReportsResponse {
 export interface BugHunterStaffListResponse {
   reports: BugHunterReportRow[]
   xp_reward_on_approval: number
+  pagination: PaginationMeta
 }
 
 export interface BugHunterStaffSettingsResponse {
@@ -836,11 +931,14 @@ export interface BugHunterStaffSettingsResponse {
 export interface StaffMessagingDirectory {
   teachers: StaffDirectUserRef[]
   staff: StaffDirectUserRef[]
+  teachers_pagination: PaginationMeta
+  staff_pagination: PaginationMeta
 }
 
 export interface StaffMessagingSummaryResponse {
   total_unread: number
   threads: StaffDirectThreadRow[]
+  pagination: PaginationMeta
   directory: StaffMessagingDirectory
 }
 

@@ -5,8 +5,8 @@ import type { AdminUserDirectoryResponse } from '@/types'
 
 export default async function SuperadminUsersPage() {
   const directory = await serverApi<AdminUserDirectoryResponse>(
-    '/admin/users?page=1&page_size=20',
-  ).catch(() => null)
+    '/admin/users?page=1&page_size=15',
+  )
 
   return (
     <AdminAreaShell area="superadmin" section="users">

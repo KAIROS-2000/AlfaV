@@ -1,11 +1,10 @@
 name: ci
 
-# AUDIT C-10 (open): SECRET_KEY and DATABASE_URL credentials below are CI-only fixtures.
-# Production deployments MUST set these via the operator's `.env`/Docker secrets.
-# Recommended hardening: move SECRET_KEY into GitHub Actions Secrets and reference as
-# `${{ secrets.CI_SECRET_KEY }}`, generated via `openssl rand -hex 32`. Done outside of code.
+permissions:
+  contents: read
 
 on:
+  workflow_call:
   push:
     branches: [main, master]
   pull_request:
@@ -13,6 +12,7 @@ on:
 jobs:
   backend-checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       APP_ENV: development
       SECRET_KEY: UnitTestSecretKey123!UnitTestSecretKey123!
@@ -21,41 +21,34 @@ jobs:
       ENABLE_DEMO_DATA: "false"
       SUPERADMIN_BOOTSTRAP: "false"
       SESSION_COOKIE_SECURE: "false"
-      GIGACHAT_VERIFY_SSL: "true"
       METRICS_DEBUG: "false"
     services:
       postgres:
-        # pin: postgres:17 (replace with digest in prod; see docs/operations/image-pinning.md)
-        image: postgres:17
-        env:
-          POSTGRES_USER: codequest
-          POSTGRES_PASSWORD: codequest
-          POSTGRES_DB: codequest_ci
-        ports:
-          - 5432:5432
+        image: postgres:17@sha256:e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449
+        env: {POSTGRES_USER: codequest, POSTGRES_PASSWORD: codequest, POSTGRES_DB: codequest_ci}
+        ports: [5432:5432]
         options: >-
-          --health-cmd "pg_isready -U codequest -d codequest_ci"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
+          --health-cmd "pg_isready -U codequest -d codequest_ci" --health-interval 10s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - name: Install backend dependencies
-        run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
-      - name: Compile backend sources
-        run: python -m compileall backend
-      - name: Smoke backend migrations
-        run: |
-          cd backend
-          python -m flask --app run.py upgrade-db
-      - name: Run backend regression tests
-        run: python -m unittest discover -s backend/tests -v
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      - run: pip install pip-audit==2.9.0
+      - run: pip-audit -r backend/requirements.txt
+      - run: python -m compileall backend
+      - run: python -m ruff check backend/app backend/tests
+      - run: cd backend && python -m flask --app run.py upgrade-db
+      - run: python -m unittest discover -s backend/tests -v
 
   backend-redis-integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       APP_ENV: development
       SECRET_KEY: UnitTestSecretKey123!UnitTestSecretKey123!
@@ -64,127 +57,211 @@ jobs:
       ENABLE_DEMO_DATA: "false"
       SUPERADMIN_BOOTSTRAP: "false"
       SESSION_COOKIE_SECURE: "false"
-      GIGACHAT_VERIFY_SSL: "true"
-      METRICS_DEBUG: "false"
       REDIS_URL: redis://localhost:6379/0
       THROTTLE_BACKEND: dual
       SESSION_VERSION_CACHE: redis
     services:
       postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: codequest
-          POSTGRES_PASSWORD: codequest
-          POSTGRES_DB: codequest_ci
-        ports:
-          - 5432:5432
+        image: postgres:17@sha256:e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449
+        env: {POSTGRES_USER: codequest, POSTGRES_PASSWORD: codequest, POSTGRES_DB: codequest_ci}
+        ports: [5432:5432]
         options: >-
-          --health-cmd "pg_isready -U codequest -d codequest_ci"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
+          --health-cmd "pg_isready -U codequest -d codequest_ci" --health-interval 10s --health-timeout 5s --health-retries 10
       redis:
-        # pin: redis:7-alpine (digest via scripts/pin-images.sh / docs/operations/image-pinning.md)
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
+        image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+        ports: [6379:6379]
         options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
+          --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - name: Install backend dependencies
-        run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
-      - name: Run backend regression tests with Redis
-        run: python -m unittest discover -s backend/tests -v
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      - name: Verify real Redis round trip
+        run: python -c "import redis; c=redis.Redis.from_url('redis://localhost:6379/0', decode_responses=True); assert c.ping(); assert c.set('ci:integration:probe','ok',ex=30); assert c.get('ci:integration:probe')=='ok'; c.delete('ci:integration:probe')"
+      - run: python -m unittest discover -s backend/tests -v
 
-  frontend-build:
+  frontend-typecheck:
     runs-on: ubuntu-latest
-    env:
-      APP_ENV: production
-      NEXT_PUBLIC_APP_ENV: production
-      NEXT_PUBLIC_API_URL: http://localhost:8000/api
-      INTERNAL_API_URL: http://localhost:8000/api
-    defaults:
-      run:
-        working-directory: frontend
+    timeout-minutes: 20
+    defaults: {run: {working-directory: frontend}}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend dependencies
-        run: npm ci
-      - name: Typecheck frontend
-        run: npm run typecheck
-      - name: Build frontend
-        run: npm run build
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: {node-version: '22', cache: npm, cache-dependency-path: frontend/package-lock.json}
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+
+  source-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {fetch-depth: 0}
+      - name: Scan complete Git history for committed secrets
+        run: >-
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854
+          detect --source=/repo --redact --no-banner
+      - name: Scan source dependencies and configuration
+        run: >-
+          docker run --rm -v "$PWD:/workspace" -v trivy-cache:/root/.cache/trivy
+          aquasec/trivy:0.66.0@sha256:086971aaf400beebd94e8300fd8ea623774419597169156cec56eec5b00dfb1e
+          fs --scanners vuln,secret,misconfig --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed /workspace
 
   compose-smoke:
     runs-on: ubuntu-latest
-    needs:
-      - backend-checks
-      - backend-redis-integration
-      - frontend-build
+    timeout-minutes: 60
+    needs: [backend-checks, backend-redis-integration, frontend-typecheck, source-security]
+    env:
+      PROGYX_IMAGE_TAG: ci
+      POSTGRES_IMAGE: progyx/postgres:ci
+      CADDY_IMAGE: progyx/caddy:ci
+      RESTIC_IMAGE: progyx/restic:ci
+      PUBLIC_DOMAIN: ci.localhost
+      PUBLIC_ORIGIN: https://ci.localhost
+      ACME_EMAIL: ops@example.invalid
+      SECRET_KEY: CIProductionValidationSecretKey1234567890ABCDEF
+      JWT_SIGNING_KEY_ID: current
+      JWT_SIGNING_KEYS: current=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      EMAIL_PROVIDER: unisender_go
+      UNISENDER_GO_API_KEY: CIProductionEmailKey1234567890
+      EMAIL_FROM: no-reply@example.invalid
+      EMAIL_FROM_NAME: Progyx CI
+      LEGAL_DOCUMENTS_VERSION: ci-legal-v1
+      NEXT_PUBLIC_SITE_URL: https://ci.localhost
+      LEGAL_OPERATOR_NAME: Progyx CI Operator
+      LEGAL_OPERATOR_TAX_ID: "660000000000"
+      LEGAL_OPERATOR_REGISTRATION_ID: "326660000000000"
+      LEGAL_OPERATOR_ADDRESS: CI test address
+      LEGAL_SUPPORT_EMAIL: support@ci.invalid
+      LEGAL_SUPPORT_PHONE: "+70000000000"
+      LEGAL_PRIVACY_CONTENT: CI privacy policy test content
+      LEGAL_TERMS_CONTENT: CI user agreement test content
+      LEGAL_PERSONAL_DATA_CONTENT: CI personal data consent test content
+      TOURNAMENT_YANDEX_PUBLIC_URL: https://disk.yandex.ru/i/IXI8UsHbHGdVjw
+      POSTGRES_PASSWORD_FILE_HOST: ./secrets/postgres_password
+      REDIS_PASSWORD_FILE_HOST: ./secrets/redis_password
+      JUDGE_RUNNER_TOKEN_FILE_HOST: ./secrets/judge_runner_token
+      RESTIC_REPOSITORY: /offsite
+      RESTIC_PASSWORD_FILE_HOST: ./secrets/restic_password
+      BACKUP_ACCESS_KEY_ID_FILE_HOST: ./secrets/backup_access_key_id
+      BACKUP_SECRET_ACCESS_KEY_FILE_HOST: ./secrets/backup_secret_access_key
+      RESTIC_AUTO_INIT: "true"
     steps:
-      - uses: actions/checkout@v4
-      - name: Prepare environment
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          tags: progyx/frontend:ci
+          load: true
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./backend/Dockerfile
+          tags: progyx/backend:ci
+          load: true
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./judge_runner/Dockerfile
+          tags: progyx/judge-runner:ci
+          load: true
+          cache-from: type=gha,scope=judge-runner
+          cache-to: type=gha,scope=judge-runner,mode=max
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./postgres
+          file: ./postgres/Dockerfile
+          tags: progyx/postgres:ci
+          load: true
+          cache-from: type=gha,scope=postgres
+          cache-to: type=gha,scope=postgres,mode=max
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./caddy
+          file: ./caddy/Dockerfile
+          tags: progyx/caddy:ci
+          load: true
+          cache-from: type=gha,scope=caddy
+          cache-to: type=gha,scope=caddy,mode=max
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./restic
+          file: ./restic/Dockerfile
+          tags: progyx/restic:ci
+          load: true
+          cache-from: type=gha,scope=restic
+          cache-to: type=gha,scope=restic,mode=max
+      - name: Prepare compose secrets
         run: |
           cp .env.example .env
-          mkdir -p secrets
-          cp secrets/redis_password.example secrets/redis_password
-          cp secrets/postgres_password.example secrets/postgres_password
-          # JUDGE_RUNNER_AUTH_TOKEN must be present (compose now fails hard if unset).
-          # Use a deterministic CI-only value; production sets it via the operator's .env.
-          printf '\nJUDGE_RUNNER_AUTH_TOKEN=ci-only-judge-token-%s\n' "$(openssl rand -hex 16)" >> .env
-      - name: Build and start services
-        run: docker compose up -d --build db redis judge-runner backend-init backend frontend
-      - name: Wait for backend health
+          openssl rand -hex 32 > secrets/redis_password
+          openssl rand -hex 32 > secrets/postgres_password
+          openssl rand -hex 32 > secrets/judge_runner_token
+          openssl rand -hex 32 > secrets/restic_password
+          printf '%s' 'ci-local-repository' > secrets/backup_access_key_id
+          printf '%s' 'ci-local-repository' > secrets/backup_secret_access_key
+      - name: Validate effective production configuration
         run: |
-          for attempt in $(seq 1 30); do
-            if curl -fsS http://localhost:8000/api/health > /tmp/backend-health.json; then
-              cat /tmp/backend-health.json
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Backend health check did not pass in time" >&2
-          docker compose logs backend
-          exit 1
-      - name: Wait for judge runner health
+          docker compose -f compose.yml -f compose.prod.yml config --quiet
+          docker compose -f compose.yml -f compose.prod.yml config --format json > /tmp/progyx-compose.json
+          python -c "import json; c=json.load(open('/tmp/progyx-compose.json')); s=c['services']; b=s['backend']['environment']; f=s['frontend']['environment']; assert not s['backend'].get('env_file'); assert not s['backend-init'].get('env_file'); assert b['APP_ENV']=='production'; assert b['SESSION_COOKIE_SECURE']=='true'; assert b['ENABLE_DEMO_DATA']=='false'; assert b['SUPERADMIN_BOOTSTRAP']=='false'; assert b['JWT_SIGNING_KEYS'].startswith('current='); assert f['APP_ENV']=='production'; assert s['backend-init']['command'][-1]=='upgrade-db'; assert s['backend-init']['depends_on']['pre-migration-offsite-backup']['condition']=='service_completed_successfully'; assert all(str(m).startswith('/') for x in s.values() for m in x.get('tmpfs', [])); assert set(s['judge-runner']['networks'])=={'judge_worker_net'}; assert 'data_net' not in s['frontend']['networks']; assert 'data_net' not in s['ingress']['networks']; assert s['db']['image']=='progyx/postgres:ci'; assert s['db-backup']['image']=='progyx/postgres:ci'; assert s['pre-migration-backup']['image']=='progyx/postgres:ci'; assert s['judge-gateway']['image']=='progyx/caddy:ci'; assert s['ingress']['image']=='progyx/caddy:ci'; assert s['pre-migration-offsite-backup']['image']=='progyx/restic:ci'; assert s['offsite-backup']['image']=='progyx/restic:ci'"
+      - name: Start prebuilt services
+        run: docker compose -f compose.yml -f compose.prod.yml up -d --wait --wait-timeout 180 --no-build
+      - name: Verify public and internal health checks
         run: |
-          for attempt in $(seq 1 30); do
-            if curl -fsS http://localhost:8090/health > /tmp/judge-health.json; then
-              cat /tmp/judge-health.json
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Judge runner health check did not pass in time" >&2
-          docker compose logs judge-runner
-          exit 1
-      - name: Wait for frontend
+          docker compose -f compose.yml -f compose.prod.yml exec -T --user 1001:1001 backend python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/api/live').status == 200; assert urllib.request.urlopen('http://127.0.0.1:8000/api/ready').status == 200"
+          docker compose -f compose.yml -f compose.prod.yml exec -T frontend node -e "fetch('http://127.0.0.1:3000/auth/login').then(r => { if (!r.ok) process.exit(1) })"
+          curl --insecure --fail --show-error --resolve ci.localhost:443:127.0.0.1 https://ci.localhost/api/live
+          curl --insecure --fail --show-error --resolve ci.localhost:443:127.0.0.1 https://ci.localhost/api/ready
+          curl --insecure --fail --show-error --resolve ci.localhost:443:127.0.0.1 https://ci.localhost/auth/login
+      - name: Verify public ingress preserves distinct trusted client IPs
         run: |
-          for attempt in $(seq 1 30); do
-            if curl -fsS http://localhost:3000/auth/login > /tmp/frontend-health.html; then
-              head -n 5 /tmp/frontend-health.html
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Frontend did not become reachable in time" >&2
-          docker compose logs frontend
-          exit 1
-      - name: Dump compose logs on failure
-        if: failure()
-        run: docker compose logs --no-color
-      - name: Stop services
-        if: always()
-        run: docker compose down -v
+          docker compose -f compose.yml -f compose.prod.yml exec -T frontend node -e "const https=require('node:https'); const request=https.request({hostname:'ingress',port:443,path:'/api/auth/options',servername:'ci.localhost',rejectUnauthorized:false,headers:{Host:'ci.localhost','X-Forwarded-For':'198.51.100.1'}}, response=>{response.resume(); response.on('end',()=>process.exit(response.statusCode===200?0:1))}); request.on('error', error=>{console.error(error.message);process.exit(1)}); request.end()"
+          ingress_id="$(docker compose -f compose.yml -f compose.prod.yml ps -q ingress)"
+          edge_network="$(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}' "$ingress_id")"
+          ingress_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ingress_id")"
+          docker run --rm --network "$edge_network" --add-host "ci.localhost:$ingress_ip" --entrypoint wget progyx/caddy:ci --no-check-certificate --header 'X-Forwarded-For: 198.51.100.1' -q -O /dev/null https://ci.localhost/api/auth/options
+          docker compose -f compose.yml -f compose.prod.yml exec -T --user 1001:1001 backend python -c "from run import app; from app.models.user import SiteActivityLog; app.app_context().push(); ips={row.client_ip for row in SiteActivityLog.query.filter_by(path='/api/auth/options').all()}; assert len(ips)>=2 and '198.51.100.1' not in ips, ips; print('distinct trusted client IPs:', len(ips))"
+      - name: Execute Python and JavaScript judge smoke
+        run: docker compose -f compose.yml -f compose.prod.yml exec -T --user 1001:1001 backend python -m flask --app run.py judge-smoke
+      - name: Verify judge cannot reach backend network
+        run: docker compose -f compose.yml -f compose.prod.yml exec -T judge-runner python judge_runner/network_isolation_smoke.py
+      - name: Scan built images
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache/trivy aquasec/trivy:0.66.0@sha256:086971aaf400beebd94e8300fd8ea623774419597169156cec56eec5b00dfb1e image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed progyx/frontend:ci
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache/trivy aquasec/trivy:0.66.0@sha256:086971aaf400beebd94e8300fd8ea623774419597169156cec56eec5b00dfb1e image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed progyx/backend:ci
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache/trivy aquasec/trivy:0.66.0@sha256:086971aaf400beebd94e8300fd8ea623774419597169156cec56eec5b00dfb1e image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed progyx/judge-runner:ci
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache/trivy aquasec/trivy:0.66.0@sha256:086971aaf400beebd94e8300fd8ea623774419597169156cec56eec5b00dfb1e image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed progyx/postgres:ci
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache/trivy aquasec/trivy:0.66.0@sha256:086971aaf400beebd94e8300fd8ea623774419597169156cec56eec5b00dfb1e image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed progyx/caddy:ci
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache/trivy aquasec/trivy:0.66.0@sha256:086971aaf400beebd94e8300fd8ea623774419597169156cec56eec5b00dfb1e image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed progyx/restic:ci
+      - name: Generate release SBOMs
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" anchore/syft:v1.33.0@sha256:f94e5d9fce1f2278491a8e3a63bd5f6ddb81fdfdbb8bf7a1637565c1d5344357 progyx/frontend:ci -o spdx-json=/out/frontend.spdx.json
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" anchore/syft:v1.33.0@sha256:f94e5d9fce1f2278491a8e3a63bd5f6ddb81fdfdbb8bf7a1637565c1d5344357 progyx/backend:ci -o spdx-json=/out/backend.spdx.json
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" anchore/syft:v1.33.0@sha256:f94e5d9fce1f2278491a8e3a63bd5f6ddb81fdfdbb8bf7a1637565c1d5344357 progyx/judge-runner:ci -o spdx-json=/out/judge-runner.spdx.json
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" anchore/syft:v1.33.0@sha256:f94e5d9fce1f2278491a8e3a63bd5f6ddb81fdfdbb8bf7a1637565c1d5344357 progyx/postgres:ci -o spdx-json=/out/postgres.spdx.json
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" anchore/syft:v1.33.0@sha256:f94e5d9fce1f2278491a8e3a63bd5f6ddb81fdfdbb8bf7a1637565c1d5344357 progyx/caddy:ci -o spdx-json=/out/caddy.spdx.json
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" anchore/syft:v1.33.0@sha256:f94e5d9fce1f2278491a8e3a63bd5f6ddb81fdfdbb8bf7a1637565c1d5344357 progyx/restic:ci -o spdx-json=/out/restic.spdx.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-sboms
+          path: '*.spdx.json'
+      - if: failure()
+        run: docker compose -f compose.yml -f compose.prod.yml logs --no-color
+      - if: always()
+        run: docker compose -f compose.yml -f compose.prod.yml down --remove-orphans

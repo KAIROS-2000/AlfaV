@@ -4,8 +4,10 @@ from datetime import UTC, datetime
 
 from flask import Blueprint, request
 from sqlalchemy import or_
+from sqlalchemy.orm.exc import StaleDataError
 
 from ..core.db import db
+from ..core.pagination import paginate_query, pagination_params
 from .lesson_builder import build_lesson_quiz
 from ..core.security import auth_required
 from ..models.learning import (
@@ -14,6 +16,7 @@ from ..models.learning import (
     ClassJoinRequest,
     ClassMembership,
     Classroom,
+    CUSTOM_CLASSROOM_MODULE_PREFIX,
     Lesson,
     Module,
     Task,
@@ -23,9 +26,12 @@ from ..models.learning import (
     custom_classroom_module_slug_prefix,
     encode_assignment_description,
     has_explicit_code_task_intent,
+    lesson_publish_readiness_errors,
     normalize_assignment_type,
     normalize_submission_format,
     normalize_task_validation,
+    normalize_authoring_metadata,
+    clone_lesson_content,
 )
 from ..models.user import User, UserRole
 from ..services import notifications, parent_messaging
@@ -37,7 +43,16 @@ teacher_bp = Blueprint('teacher', __name__)
 VALID_AGE_GROUPS = {'junior', 'middle', 'senior'}
 VALID_DIFFICULTIES = {'easy', 'medium', 'hard'}
 VALID_SUBMISSION_REVIEW_STATUSES = {'checked', 'needs_revision'}
+VALID_SUBMISSION_LIST_STATUSES = {
+    'all',
+    'pending',
+    'submitted',
+    'pending_review',
+    *VALID_SUBMISSION_REVIEW_STATUSES,
+}
 VALID_JOIN_REQUEST_STATUSES = {'pending', 'approved', 'rejected'}
+VALID_LESSON_LIST_STATUSES = {'all', 'draft', 'published', 'archived'}
+VALID_CATALOG_SOURCES = {'all', 'catalog', 'teacher'}
 ASSIGNMENT_TYPE_DEFAULT_TITLES = {
     'lesson_practice': 'Практика по уроку',
     'mini_project': 'Мини-проект',
@@ -79,8 +94,8 @@ LESSON_REQUIRED_FIELD_LABELS = {
 }
 
 
-def _teacher_classes(current_user: User) -> list[Classroom]:
-    return Classroom.query.filter_by(teacher_id=current_user.id).order_by(Classroom.created_at.desc()).all()
+def _teacher_class_ids(current_user: User) -> list[int]:
+    return [row[0] for row in Classroom.query.with_entities(Classroom.id).filter_by(teacher_id=current_user.id).all()]
 
 
 def _teacher_join_request_or_404(current_user: User, request_id: int) -> ClassJoinRequest:
@@ -101,6 +116,76 @@ def _safe_int(value, default: int, minimum: int | None = None, maximum: int | No
     if maximum is not None:
         parsed = min(parsed, maximum)
     return parsed
+
+
+def _is_draft_save(data: dict) -> bool:
+    """Only an explicit JSON boolean opens the incomplete draft-save path."""
+    return data.get('save_draft') is True
+
+
+def _draft_payload_from_request(data: dict) -> dict:
+    raw_payload = data.get('draft_payload')
+    if isinstance(raw_payload, dict):
+        return raw_payload
+    return {
+        key: data[key]
+        for key in (
+            'title', 'summary', 'age_group', 'content_format', 'duration_minutes',
+            'passing_score', 'theory_text', 'key_points', 'interactive_steps',
+            'practice_enabled', 'task_type', 'task_title', 'task_prompt',
+            'task_hints', 'evaluation_mode', 'answer_keywords', 'starter_code',
+            'programming_language', 'judge_tests', 'time_limit_ms',
+            'memory_limit_mb', 'task', 'quiz',
+        )
+        if key in data
+    }
+
+
+def _is_complete_builder_payload(data: dict) -> bool:
+    has_task_payload = 'task' in data or 'practice_enabled' in data
+    return has_task_payload and all(
+        field in data
+        for field in (
+            'title', 'summary', 'content_format', 'duration_minutes',
+            'passing_score', 'theory_text', 'key_points', 'interactive_steps',
+            'quiz',
+        )
+    )
+
+
+def _authoring_metadata_for_write(lesson: Lesson, data: dict) -> dict:
+    metadata = normalize_authoring_metadata(lesson.authoring_metadata)
+    if isinstance(data.get('authoring_metadata'), dict):
+        metadata = normalize_authoring_metadata(data['authoring_metadata'])
+    if 'format_note' in data:
+        metadata['format_note'] = str(data.get('format_note') or '').strip()
+    if _is_draft_save(data):
+        if 'draft_payload' in data and not isinstance(data.get('draft_payload'), dict):
+            raise ValueError('Черновик должен содержать JSON-объект размером не более 64 КБ.')
+        metadata['draft_payload'] = _draft_payload_from_request(data)
+    elif _is_complete_builder_payload(data):
+        metadata.pop('draft_payload', None)
+
+    normalized = normalize_authoring_metadata(metadata)
+    if _is_draft_save(data) and 'draft_payload' not in normalized:
+        raise ValueError('Черновик должен содержать JSON-объект размером не более 64 КБ.')
+    return normalized
+
+
+def _lesson_list_status_from_request() -> str | None:
+    raw_status = request.args.get('status')
+    status = 'all' if raw_status is None else raw_status.strip().lower()
+    return status if status in VALID_LESSON_LIST_STATUSES else None
+
+
+def _filter_lessons_by_status(query, status: str):
+    if status == 'draft':
+        return query.filter(Lesson.is_published.is_(False), Lesson.archived_at.is_(None))
+    if status == 'published':
+        return query.filter(Lesson.is_published.is_(True), Lesson.archived_at.is_(None))
+    if status == 'archived':
+        return query.filter(Lesson.archived_at.is_not(None))
+    return query
 
 
 def _parse_positive_int(value) -> int | None:
@@ -136,12 +221,16 @@ def _normalize_difficulty(value: str | None) -> str:
     return normalized if normalized in VALID_DIFFICULTIES else 'medium'
 
 
-def _split_lines(value: str | None) -> list[str]:
-    return [item.strip() for item in (value or '').splitlines() if item.strip()]
+def _split_lines(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(item or '').strip() for item in value if str(item or '').strip()]
+    return [item.strip() for item in str(value or '').splitlines() if item.strip()]
 
 
-def _split_csv(value: str | None) -> list[str]:
-    return [item.strip() for item in (value or '').split(',') if item.strip()]
+def _split_csv(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(item or '').strip() for item in value if str(item or '').strip()]
+    return [item.strip() for item in str(value or '').replace('\n', ',').split(',') if item.strip()]
 
 
 def _normalize_due_date(value: str | None) -> str | None:
@@ -162,17 +251,14 @@ def _complete_judge_tests(value) -> list[dict]:
     for item in value:
         if not isinstance(item, dict):
             continue
-        test_input = str(
-            item.get('input')
-            if item.get('input') is not None
-            else item.get('stdin') or ''
-        ).strip()
         expected = str(
             item.get('expected')
             if item.get('expected') is not None
             else item.get('stdout') or ''
-        ).strip()
-        if test_input and expected:
+        )
+        # Empty stdin is a valid test case (programs often read no input), but
+        # a judge test still needs an expected result.
+        if expected:
             tests.append(item)
     return tests
 
@@ -184,17 +270,12 @@ def _has_partial_judge_test(value) -> bool:
     for item in value:
         if not isinstance(item, dict):
             continue
-        test_input = str(
-            item.get('input')
-            if item.get('input') is not None
-            else item.get('stdin') or ''
-        ).strip()
         expected = str(
             item.get('expected')
             if item.get('expected') is not None
             else item.get('stdout') or ''
-        ).strip()
-        if bool(test_input) != bool(expected):
+        )
+        if not expected:
             return True
     return False
 
@@ -326,9 +407,9 @@ def _get_or_create_custom_module(classroom: Classroom, age_group: str) -> Module
 
 
 def _teacher_can_use_lesson(classroom: Classroom, lesson: Lesson) -> bool:
-    if lesson.module.is_published:
+    if lesson.module.is_published and lesson.is_published and lesson.archived_at is None:
         return True
-    return lesson.module.custom_classroom_id == classroom.id
+    return lesson.module.custom_classroom_id == classroom.id and lesson.is_published and lesson.archived_at is None
 
 
 def _lesson_catalog_item(lesson: Lesson) -> dict:
@@ -341,22 +422,293 @@ def _lesson_catalog_item(lesson: Lesson) -> dict:
     }
 
 
-def _catalog_lessons_for_teacher(current_user: User, classroom: Classroom | None = None) -> list[Lesson]:
-    filters = [Module.is_published.is_(True)]
-    classroom_ids = [classroom.id] if classroom else [item.id for item in _teacher_classes(current_user)]
-    filters.extend(Module.slug.like(f'{custom_classroom_module_slug_prefix(classroom_id)}%') for classroom_id in classroom_ids)
-    return (
-        Lesson.query.join(Module)
-        .filter(or_(*filters))
-        .order_by(Module.is_published.desc(), Module.title.asc(), Lesson.order_index.asc())
-        .all()
+def _catalog_lessons_for_teacher(
+    current_user: User,
+    classroom: Classroom | None = None,
+    *,
+    source: str = 'all',
+    search: str = '',
+):
+    classroom_ids = [classroom.id] if classroom else _teacher_class_ids(current_user)
+    public_filter = (
+        Module.is_published.is_(True)
+        & Module.slug.notlike(f'{CUSTOM_CLASSROOM_MODULE_PREFIX}%')
     )
+    teacher_filters = [
+        Module.slug.like(f'{custom_classroom_module_slug_prefix(classroom_id)}%')
+        for classroom_id in classroom_ids
+    ]
+    if source == 'catalog':
+        visibility_filter = public_filter
+    elif source == 'teacher':
+        visibility_filter = or_(*teacher_filters) if teacher_filters else Module.id.is_(None)
+    else:
+        visibility_filter = or_(public_filter, *teacher_filters)
+
+    query = Lesson.query.join(Module).filter(
+        visibility_filter,
+        Lesson.is_published.is_(True),
+        Lesson.archived_at.is_(None),
+    )
+    if search:
+        pattern = f'%{search}%'
+        query = query.filter(or_(
+            Lesson.title.ilike(pattern),
+            Lesson.summary.ilike(pattern),
+            Module.title.ilike(pattern),
+        ))
+    return query.order_by(
+        Module.is_published.desc(),
+        Module.title.asc(),
+        Module.id.asc(),
+        Lesson.order_index.asc(),
+        Lesson.id.asc(),
+    )
+
+
+def _teacher_owns_lesson(current_user: User, lesson: Lesson) -> bool:
+    classroom_id = lesson.module.custom_classroom_id
+    return bool(
+        classroom_id
+        and Classroom.query.filter_by(id=classroom_id, teacher_id=current_user.id).first()
+    )
+
+
+def _teacher_lesson_or_404(current_user: User, lesson_id: int) -> Lesson:
+    lesson = db.get_or_404(Lesson, lesson_id)
+    if not _teacher_owns_lesson(current_user, lesson):
+        from flask import abort
+        abort(403)
+    return lesson
+
+
+def _build_teacher_theory_blocks(
+    title: str, summary: str, theory_text: str, key_points: list[str]
+) -> list[dict]:
+    blocks = [{'type': 'hero', 'title': title, 'text': summary}]
+    if theory_text:
+        blocks.append({'type': 'text', 'title': 'Объяснение', 'text': theory_text})
+    if key_points:
+        blocks.append({'type': 'list', 'title': 'Ключевые идеи', 'items': key_points})
+    return blocks
+
+
+def _build_teacher_interactive_steps(raw_steps) -> list[dict]:
+    return [
+        {'title': f'Шаг {index}', 'text': item}
+        for index, item in enumerate(_split_lines(raw_steps), start=1)
+    ]
+
+
+def _flat_task_payload(raw_task: dict) -> dict:
+    """Translate the shared builder's nested task into the teacher create shape."""
+    return {
+        'practice_enabled': raw_task.get('enabled') is True,
+        'task_type': raw_task.get('task_type'),
+        'task_title': raw_task.get('title'),
+        'task_prompt': raw_task.get('prompt'),
+        'task_hints': raw_task.get('hints'),
+        'evaluation_mode': raw_task.get('evaluation_mode'),
+        'answer_keywords': raw_task.get('keywords'),
+        'starter_code': raw_task.get('starter_code'),
+        'programming_language': raw_task.get('language'),
+        'judge_tests': raw_task.get('tests'),
+        'time_limit_ms': raw_task.get('time_limit_ms'),
+        'memory_limit_mb': raw_task.get('memory_limit_mb'),
+        'xp_reward': raw_task.get('xp_reward'),
+    }
+
+
+def _build_teacher_task(lesson: Lesson, data: dict) -> Task | None:
+    task_title = str(data.get('task_title') or '').strip()
+    task_prompt = str(data.get('task_prompt') or '').strip()
+    starter_code = str(data.get('starter_code') or '')
+    requested_task_type = 'code' if str(data.get('task_type') or '').strip().lower() == 'code' else 'text'
+    requested_is_code_task = requested_task_type == 'code' or bool(starter_code.strip())
+    practice_enabled = _lesson_practice_requested(data)
+    answer_keywords = _split_csv(data.get('answer_keywords'))
+    explicit_code_intent = has_explicit_code_task_intent(
+        title=task_title,
+        prompt=task_prompt,
+        starter_code=starter_code,
+    )
+    if requested_task_type == 'text' and explicit_code_intent:
+        raise ValueError('Задание выглядит как кодовая практика. Выберите формат "Код" и добавьте автотесты.')
+
+    judge_tests = data.get('judge_tests')
+    requested_code_runner = str(data.get('evaluation_mode') or '').strip().lower() == 'stdin_stdout' or bool(judge_tests)
+    age_group = lesson.module.age_group
+    if not age_group_supports_code(age_group) and (requested_is_code_task or requested_code_runner):
+        raise ValueError('Для Junior-уроков кодовая практика недоступна. Используйте текстовое задание без стартового кода и автотестов.')
+    if not practice_enabled:
+        return None
+
+    task_hints = _split_lines(data.get('task_hints')) or (
+        [
+            'Проверь, что программа читает входные данные из stdin.',
+            'Сравни формат вывода с ожидаемым ответом посимвольно.',
+            'Прогони решение на граничных примерах перед отправкой.',
+        ]
+        if requested_is_code_task
+        else [
+            'Сверь ответ с объяснением урока.',
+            'Разбей решение на короткие шаги.',
+            'Проверь, есть ли в ответе ключевые слова темы.',
+        ]
+    )
+    task_validation = normalize_task_validation(
+        {
+            'evaluation_mode': data.get('evaluation_mode'),
+            'language': data.get('programming_language'),
+            'keywords': answer_keywords,
+            'tests': judge_tests,
+            'time_limit_ms': data.get('time_limit_ms'),
+            'memory_limit_mb': data.get('memory_limit_mb'),
+        },
+        is_custom_lesson=True,
+        task_type='code' if requested_is_code_task else 'text',
+        age_group=age_group,
+    )
+    if requested_is_code_task and not task_validation['tests']:
+        raise ValueError('Кодовая задача сохраняется только с автотестами. Добавьте хотя бы один тест с входом и ожидаемым выводом.')
+    if task_validation['evaluation_mode'] == 'keywords' and not task_validation['keywords']:
+        raise ValueError('Для автопроверки по ключевым словам добавьте хотя бы одно ключевое слово.')
+    if task_validation['evaluation_mode'] == 'stdin_stdout' and not task_validation['tests']:
+        raise ValueError('Для проверки кода добавьте хотя бы один тест с входом и ожидаемым выводом.')
+
+    task_type = 'code' if requested_is_code_task or task_validation['evaluation_mode'] == 'stdin_stdout' else 'text'
+    return Task(
+        lesson_id=lesson.id,
+        task_type=task_type,
+        title=task_title or f'Практика: {lesson.title}',
+        prompt=task_prompt or 'Выполни практическое задание по этому уроку.',
+        starter_code=starter_code if task_type == 'code' else '',
+        validation=task_validation,
+        hints=task_hints,
+        xp_reward=_safe_int(data.get('xp_reward'), 0, minimum=0, maximum=500),
+    )
+
+
+def _apply_teacher_lesson_changes(lesson: Lesson, data: dict) -> None:
+    for field in ('title', 'summary', 'content_format'):
+        if field in data:
+            value = str(data.get(field) or '').strip()
+            if value:
+                setattr(lesson, field, value)
+    for field, minimum, maximum in (
+        ('duration_minutes', 5, 180),
+        ('passing_score', 0, 100),
+    ):
+        if field in data:
+            setattr(lesson, field, _safe_int(data[field], getattr(lesson, field), minimum=minimum, maximum=maximum))
+
+    if 'theory_blocks' in data and isinstance(data['theory_blocks'], list):
+        lesson.theory_blocks = data['theory_blocks']
+    elif any(field in data for field in ('theory_text', 'key_points')):
+        lesson.theory_blocks = _build_teacher_theory_blocks(
+            lesson.title,
+            lesson.summary,
+            str(data.get('theory_text') or '').strip(),
+            _split_lines(data.get('key_points')) or _split_csv(data.get('key_points')),
+        )
+    if 'interactive_steps' in data:
+        raw_steps = data['interactive_steps']
+        lesson.interactive_steps = (
+            raw_steps
+            if isinstance(raw_steps, list) and all(isinstance(item, dict) for item in raw_steps)
+            else _build_teacher_interactive_steps(raw_steps)
+        )
+
+    lesson.authoring_metadata = _authoring_metadata_for_write(lesson, data)
+    if _is_draft_save(data):
+        return
+
+    if 'task' in data:
+        raw_task = data.get('task')
+        if not isinstance(raw_task, dict):
+            raw_task = {'enabled': False}
+        task = _build_teacher_task(lesson, _flat_task_payload(raw_task))
+        lesson.tasks.clear()
+        if task is not None:
+            lesson.tasks.append(task)
+    elif 'practice_enabled' in data:
+        task = _build_teacher_task(lesson, data)
+        lesson.tasks.clear()
+        if task is not None:
+            lesson.tasks.append(task)
+    elif 'tasks' in data and isinstance(data['tasks'], list):
+        replacement_tasks: list[Task] = []
+        for raw in data['tasks']:
+            if not isinstance(raw, dict):
+                continue
+            task_type = 'code' if str(raw.get('task_type') or '').strip().lower() == 'code' else 'text'
+            validation = normalize_task_validation(
+                raw.get('validation'),
+                is_custom_lesson=True,
+                task_type=task_type,
+                age_group=lesson.module.age_group,
+            )
+            replacement_tasks.append(Task(
+                task_type=task_type,
+                title=str(raw.get('title') or '').strip() or f'Практика: {lesson.title}',
+                prompt=str(raw.get('prompt') or '').strip() or 'Выполни практическое задание по этому уроку.',
+                starter_code=str(raw.get('starter_code') or '') if task_type == 'code' else '',
+                validation=validation,
+                hints=_split_lines(raw.get('hints')),
+                xp_reward=_safe_int(raw.get('xp_reward'), 0, minimum=0, maximum=500),
+            ))
+        lesson.tasks.clear()
+        lesson.tasks.extend(replacement_tasks)
+
+    if 'quiz' in data:
+        quiz = build_lesson_quiz(lesson, data.get('quiz'), lesson.title, question_prefix='teacher-q')
+        lesson.quizzes.clear()
+        if quiz is not None:
+            lesson.quizzes.append(quiz)
+    elif 'quizzes' in data and isinstance(data['quizzes'], list):
+        replacement_quizzes = []
+        for raw in data['quizzes']:
+            if not isinstance(raw, dict):
+                continue
+            quiz = build_lesson_quiz(lesson, {**raw, 'enabled': True}, lesson.title, question_prefix='teacher-q')
+            if quiz is not None:
+                replacement_quizzes.append(quiz)
+        lesson.quizzes.clear()
+        lesson.quizzes.extend(replacement_quizzes)
+
+
+def _check_lesson_version(lesson: Lesson, data: dict):
+    try:
+        expected = int(data.get('version'))
+    except (TypeError, ValueError):
+        return {'message': 'Укажите актуальную версию урока.', 'lesson': lesson.to_authoring_dict()}, 400
+    if expected != lesson.version:
+        return {'message': 'Урок уже изменён в другой вкладке.', 'lesson': lesson.to_authoring_dict()}, 409
+    return None
+
+
+def _check_optional_lesson_version(lesson: Lesson, data: dict):
+    return _check_lesson_version(lesson, data) if 'version' in data else None
+
+
+def _stale_lesson_write_response(lesson_id: int):
+    db.session.rollback()
+    current_lesson = db.session.get(Lesson, lesson_id)
+    return {
+        'message': 'Урок уже изменён в другой вкладке.',
+        'lesson': current_lesson.to_authoring_dict() if current_lesson else None,
+    }, 409
 
 
 @teacher_bp.get('/overview')
 @auth_required([UserRole.TEACHER])
 def teacher_overview(current_user: User):
-    return TeacherQueryService().overview_payload(current_user)
+    page, page_size = pagination_params(request.args)
+    return TeacherQueryService().overview_payload(
+        current_user,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @teacher_bp.post('/classes')
@@ -385,8 +737,12 @@ def create_class(current_user: User):
 @teacher_bp.get('/classes')
 @auth_required([UserRole.TEACHER])
 def list_classes(current_user: User):
-    classes = _teacher_classes(current_user)
-    return {'classes': [item.to_dict() for item in classes]}
+    page, page_size = pagination_params(request.args)
+    return TeacherQueryService().classes_payload(
+        current_user,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @teacher_bp.get('/join-requests')
@@ -402,8 +758,13 @@ def list_join_requests(current_user: User):
     if status != 'all':
         query = query.filter(ClassJoinRequest.status == status)
 
-    join_requests = query.order_by(ClassJoinRequest.created_at.desc()).all()
-    return {'requests': [item.to_dict() for item in join_requests]}
+    page, page_size = pagination_params(request.args)
+    query = query.order_by(ClassJoinRequest.created_at.desc(), ClassJoinRequest.id.desc())
+    join_requests, pagination = paginate_query(query, page=page, page_size=page_size)
+    return {
+        'requests': [item.to_dict() for item in join_requests],
+        'pagination': pagination,
+    }
 
 
 @teacher_bp.post('/join-requests/<int:request_id>/approve')
@@ -459,7 +820,21 @@ def reject_join_request(current_user: User, request_id: int):
 @teacher_bp.get('/classes/<int:classroom_id>')
 @auth_required([UserRole.TEACHER])
 def class_detail(current_user: User, classroom_id: int):
-    return TeacherQueryService().class_detail_payload(current_user, classroom_id)
+    students_page, page_size = pagination_params(
+        request.args,
+        page_key='students_page',
+    )
+    assignments_page, _ = pagination_params(
+        request.args,
+        page_key='assignments_page',
+    )
+    return TeacherQueryService().class_detail_payload(
+        current_user,
+        classroom_id,
+        students_page=students_page,
+        assignments_page=assignments_page,
+        page_size=page_size,
+    )
 
 
 def _sync_lesson_progress_from_review(submission: AssignmentSubmission) -> None:
@@ -488,7 +863,8 @@ def _sync_lesson_progress_from_review(submission: AssignmentSubmission) -> None:
 def create_class_lesson(current_user: User, classroom_id: int):
     classroom = Classroom.query.filter_by(id=classroom_id, teacher_id=current_user.id).first_or_404()
     data = request.get_json() or {}
-    missing_fields = _missing_lesson_fields(data)
+    save_draft = _is_draft_save(data)
+    missing_fields = [] if save_draft else _missing_lesson_fields(data)
     if missing_fields:
         labels = ', '.join(LESSON_REQUIRED_FIELD_LABELS[field] for field in missing_fields)
         return {
@@ -496,120 +872,199 @@ def create_class_lesson(current_user: User, classroom_id: int):
             'fields': missing_fields,
         }, 400
 
-    title = (data.get('title') or '').strip()
-    summary = (data.get('summary') or '').strip()
+    title = str(data.get('title') or '').strip() or 'Черновик урока'
+    summary = str(data.get('summary') or '').strip() or 'Черновик урока. Заполните описание перед публикацией.'
 
     age_group = _normalize_age_group(data.get('age_group'))
     module = _get_or_create_custom_module(classroom, age_group)
     previous_lesson = Lesson.query.filter_by(module_id=module.id).order_by(Lesson.order_index.desc()).first()
     order_index = (previous_lesson.order_index if previous_lesson else 0) + 1
 
-    theory_text = (data.get('theory_text') or '').strip()
-    key_points = _split_lines(data.get('key_points')) or _split_csv(data.get('answer_keywords'))
-    theory_blocks = [{'type': 'hero', 'title': title, 'text': summary}]
-    if theory_text:
-        theory_blocks.append({'type': 'text', 'title': 'Объяснение', 'text': theory_text})
-    if key_points:
-        theory_blocks.append({'type': 'list', 'title': 'Ключевые идеи', 'items': key_points})
-
-    interactive_steps = [
-        {'title': f'Шаг {index}', 'text': item}
-        for index, item in enumerate(_split_lines(data.get('interactive_steps')), start=1)
-    ]
+    theory_text = str(data.get('theory_text') or '').strip()
+    key_points = _split_lines(data.get('key_points')) or _split_csv(data.get('key_points'))
+    theory_blocks = _build_teacher_theory_blocks(title, summary, theory_text, key_points)
+    interactive_steps = _build_teacher_interactive_steps(data.get('interactive_steps'))
 
     lesson = Lesson(
         module_id=module.id,
         slug=f'teacher-class-{classroom.id}-lesson-{order_index}-{generate_code(4).lower()}',
         title=title,
         summary=summary,
-        content_format='mixed',
+        content_format=str(data.get('content_format') or 'mixed').strip() or 'mixed',
         theory_blocks=theory_blocks,
         interactive_steps=interactive_steps,
         order_index=order_index,
         duration_minutes=_safe_int(data.get('duration_minutes'), 10, minimum=5, maximum=180),
         passing_score=_safe_int(data.get('passing_score'), 70, minimum=0, maximum=100),
         is_published=False,
+        created_by_id=current_user.id,
+        authoring_metadata={},
     )
     db.session.add(lesson)
     db.session.flush()
 
-    task_title = (data.get('task_title') or '').strip()
-    task_prompt = (data.get('task_prompt') or '').strip()
-    starter_code = data.get('starter_code') or ''
-    requested_task_type = 'code' if (data.get('task_type') or '').strip().lower() == 'code' else 'text'
-    requested_is_code_task = requested_task_type == 'code' or bool(starter_code.strip())
-    practice_enabled = _lesson_practice_requested(data)
-    answer_keywords = _split_csv(data.get('answer_keywords'))
-    explicit_code_intent = has_explicit_code_task_intent(
-        title=task_title,
-        prompt=task_prompt,
-        starter_code=starter_code,
-    )
-    if requested_task_type == 'text' and explicit_code_intent:
-        return {'message': 'Задание выглядит как кодовая практика. Выберите формат "Код" и добавьте автотесты.'}, 400
-    judge_tests = data.get('judge_tests')
-    requested_code_runner = (data.get('evaluation_mode') or '').strip().lower() == 'stdin_stdout' or bool(judge_tests)
-    if not age_group_supports_code(age_group) and (requested_is_code_task or requested_code_runner):
-        return {'message': 'Для Junior-уроков кодовая практика недоступна. Используйте текстовое задание без стартового кода и автотестов.'}, 400
-    task_hints = _split_lines(data.get('task_hints')) or (
-        [
-            'Проверь, что программа читает входные данные из stdin.',
-            'Сравни формат вывода с ожидаемым ответом посимвольно.',
-            'Прогони решение на граничных примерах перед отправкой.',
-        ]
-        if requested_is_code_task
-        else [
-            'Сверь ответ с объяснением урока.',
-            'Разбей решение на короткие шаги.',
-            'Проверь, есть ли в ответе ключевые слова темы.',
-        ]
-    )
-    if practice_enabled:
-        task_validation = normalize_task_validation(
-            {
-                'evaluation_mode': data.get('evaluation_mode'),
-                'language': data.get('programming_language'),
-                'keywords': answer_keywords,
-                'tests': judge_tests,
-                'time_limit_ms': data.get('time_limit_ms'),
-                'memory_limit_mb': data.get('memory_limit_mb'),
-            },
-            is_custom_lesson=True,
-            task_type='code' if requested_is_code_task else 'text',
-            age_group=age_group,
-        )
-        if requested_is_code_task and not task_validation['tests']:
-            return {'message': 'Кодовая задача сохраняется только с автотестами. Добавьте хотя бы один тест с входом и ожидаемым выводом.'}, 400
-        if task_validation['evaluation_mode'] == 'keywords' and not task_validation['keywords']:
-            return {'message': 'Для автопроверки по ключевым словам добавьте хотя бы одно ключевое слово.'}, 400
-        if task_validation['evaluation_mode'] == 'stdin_stdout' and not task_validation['tests']:
-            return {'message': 'Для проверки кода добавьте хотя бы один тест с входом и ожидаемым выводом.'}, 400
-        task_type = 'code' if requested_is_code_task or task_validation['evaluation_mode'] == 'stdin_stdout' else 'text'
-        normalized_starter_code = starter_code if task_type == 'code' else ''
-        db.session.add(
-            Task(
-                lesson_id=lesson.id,
-                task_type=task_type,
-                title=task_title or f'Практика: {title}',
-                prompt=task_prompt or 'Выполни практическое задание по этому уроку.',
-                starter_code=normalized_starter_code,
-                validation=task_validation,
-                hints=task_hints,
-                xp_reward=0,
-            )
-        )
-
     try:
-        quiz = build_lesson_quiz(lesson, data.get('quiz'), title, question_prefix='teacher-q')
-        if quiz is not None:
-            db.session.add(quiz)
+        lesson.authoring_metadata = _authoring_metadata_for_write(lesson, data)
+        if not save_draft:
+            task = _build_teacher_task(lesson, data)
+            if task is not None:
+                db.session.add(task)
+            quiz = build_lesson_quiz(lesson, data.get('quiz'), title, question_prefix='teacher-q')
+            if quiz is not None:
+                db.session.add(quiz)
+            readiness_errors = lesson_publish_readiness_errors(lesson)
+            if readiness_errors:
+                db.session.rollback()
+                return {
+                    'message': 'Урок нельзя сохранить без обязательного содержания.',
+                    'errors': readiness_errors,
+                }, 400
     except ValueError as exc:
         db.session.rollback()
         return {'message': str(exc)}, 400
 
+    db.session.commit()
+    return {'lesson': lesson.to_authoring_dict(), 'catalog_item': _lesson_catalog_item(lesson)}, 201
+
+
+@teacher_bp.get('/classes/<int:classroom_id>/lessons')
+@auth_required([UserRole.TEACHER])
+def list_class_lessons(current_user: User, classroom_id: int):
+    classroom = Classroom.query.filter_by(id=classroom_id, teacher_id=current_user.id).first_or_404()
+    status = _lesson_list_status_from_request()
+    if status is None:
+        return {
+            'message': 'Некорректный статус урока.',
+            'allowed_statuses': sorted(VALID_LESSON_LIST_STATUSES),
+        }, 400
+
+    page, page_size = pagination_params(request.args)
+    query = _filter_lessons_by_status(
+        Lesson.query.join(Module).filter(
+            Module.slug.like(f'{custom_classroom_module_slug_prefix(classroom.id)}%')
+        ),
+        status,
+    ).order_by(Lesson.updated_at.desc(), Lesson.id.desc())
+    lessons, pagination = paginate_query(query, page=page, page_size=page_size)
+    return {
+        'lessons': [
+            {
+                **lesson.to_authoring_summary_dict(),
+                'classroom_id': classroom.id,
+                'classroom_name': classroom.name,
+            }
+            for lesson in lessons
+        ],
+        'pagination': pagination,
+    }
+
+
+@teacher_bp.get('/lessons/<int:lesson_id>')
+@auth_required([UserRole.TEACHER])
+def get_teacher_lesson(current_user: User, lesson_id: int):
+    lesson = _teacher_lesson_or_404(current_user, lesson_id)
+    return {'lesson': lesson.to_authoring_dict()}
+
+
+@teacher_bp.patch('/lessons/<int:lesson_id>')
+@auth_required([UserRole.TEACHER])
+def update_teacher_lesson(current_user: User, lesson_id: int):
+    lesson = _teacher_lesson_or_404(current_user, lesson_id)
+    data = request.get_json() or {}
+    conflict = _check_lesson_version(lesson, data)
+    if conflict:
+        return conflict
+    if _is_draft_save(data) and lesson.is_published and lesson.archived_at is None:
+        return {
+            'message': 'Нельзя сохранять неполный черновик поверх опубликованного урока. Сначала снимите урок с публикации.'
+        }, 409
+    try:
+        _apply_teacher_lesson_changes(lesson, data)
+    except ValueError as exc:
+        db.session.rollback()
+        return {'message': str(exc)}, 400
+    if lesson.is_published or _is_complete_builder_payload(data):
+        readiness_errors = lesson_publish_readiness_errors(lesson)
+        if readiness_errors:
+            db.session.rollback()
+            return {
+                'message': 'Урок нельзя сохранить в таком состоянии.',
+                'errors': readiness_errors,
+            }, 400
+    lesson.version += 1
+    try:
+        db.session.commit()
+    except StaleDataError:
+        return _stale_lesson_write_response(lesson_id)
+    return {'lesson': lesson.to_authoring_dict()}
+
+
+@teacher_bp.post('/lessons/<int:lesson_id>/clone')
+@auth_required([UserRole.TEACHER])
+def clone_teacher_lesson(current_user: User, lesson_id: int):
+    source = db.get_or_404(Lesson, lesson_id)
+    target_classroom_id = _parse_positive_int((request.get_json() or {}).get('classroom_id'))
+    if target_classroom_id is None:
+        return {'message': 'Укажите класс, в библиотеку которого нужно сохранить копию.'}, 400
+    classroom = Classroom.query.filter_by(id=target_classroom_id, teacher_id=current_user.id).first_or_404()
+    is_public_source = (
+        not source.module.is_custom_classroom_module
+        and source.module.is_published
+        and source.is_published
+        and source.archived_at is None
+    )
+    if not is_public_source and not _teacher_owns_lesson(current_user, source):
+        return {'message': 'Нельзя копировать недоступный урок.'}, 403
+    module = _get_or_create_custom_module(classroom, source.module.age_group)
+    previous = Lesson.query.filter_by(module_id=module.id).order_by(Lesson.order_index.desc()).first()
+    clone = Lesson(
+        module_id=module.id,
+        slug=f'teacher-class-{classroom.id}-lesson-{(previous.order_index if previous else 0) + 1}-{generate_code(4).lower()}',
+        title=f'Копия: {source.title}',
+        summary=source.summary,
+        order_index=(previous.order_index if previous else 0) + 1,
+        is_published=False,
+        created_by_id=current_user.id,
+    )
+    clone_lesson_content(source, clone)
+    db.session.add(clone)
+    db.session.commit()
+    return {'lesson': clone.to_authoring_dict(), 'catalog_item': _lesson_catalog_item(clone)}, 201
+
+
+@teacher_bp.post('/lessons/<int:lesson_id>/share')
+@auth_required([UserRole.TEACHER])
+def share_teacher_lesson(current_user: User, lesson_id: int):
+    lesson = _teacher_lesson_or_404(current_user, lesson_id)
+    data = request.get_json(silent=True) or {}
+    conflict = _check_optional_lesson_version(lesson, data)
+    if conflict:
+        return conflict
+    classroom_id = _parse_positive_int(data.get('classroom_id'))
+    source_classroom_id = lesson.module.custom_classroom_id
+    if classroom_id is not None and classroom_id != source_classroom_id:
+        return {'message': 'Чтобы поделиться с другим классом, сначала создайте копию урока в его библиотеке.'}, 400
+    classroom = Classroom.query.filter_by(id=source_classroom_id, teacher_id=current_user.id).first_or_404()
+    readiness_errors = lesson_publish_readiness_errors(lesson)
+    if readiness_errors:
+        return {
+            'message': 'Урок пока нельзя открыть классу.',
+            'errors': readiness_errors,
+        }, 400
+    if lesson.is_published and lesson.archived_at is None:
+        return {'lesson': lesson.to_authoring_dict()}
+    lesson.is_published = True
+    lesson.archived_at = None
+    lesson.published_at = lesson.published_at or datetime.now(UTC)
+    lesson.version += 1
+    # Persist visibility before notifications/emails can be sent.
+    try:
+        db.session.commit()
+    except StaleDataError:
+        return _stale_lesson_write_response(lesson_id)
     notifications.notify_students_new_class_lesson(current_user, classroom, lesson)
     db.session.commit()
-    return {'lesson': lesson.to_dict(include_private=True), 'catalog_item': _lesson_catalog_item(lesson)}, 201
+    return {'lesson': lesson.to_authoring_dict()}
 
 
 @teacher_bp.post('/classes/<int:classroom_id>/assignments')
@@ -632,7 +1087,7 @@ def create_assignment(current_user: User, classroom_id: int):
     parsed_lesson_id = _parse_positive_int(lesson_id)
     if parsed_lesson_id is None:
         return {'message': 'Некорректный идентификатор урока.'}, 400
-    lesson = Lesson.query.get_or_404(parsed_lesson_id)
+    lesson = db.get_or_404(Lesson, parsed_lesson_id)
     if not _teacher_can_use_lesson(classroom, lesson):
         return {'message': 'Этот урок нельзя назначить выбранному классу.'}, 403
     title = (data.get('title') or '').strip()
@@ -649,6 +1104,9 @@ def create_assignment(current_user: User, classroom_id: int):
     )
     db.session.add(assignment)
     db.session.flush()
+    # The assignment must be durable before an email or in-app notification
+    # can link a student to it.
+    db.session.commit()
     notifications.notify_students_new_assignment(current_user, classroom, assignment)
     db.session.commit()
     return {'assignment': assignment.to_dict()}, 201
@@ -657,14 +1115,33 @@ def create_assignment(current_user: User, classroom_id: int):
 @teacher_bp.get('/classes/<int:classroom_id>/assignments')
 @auth_required([UserRole.TEACHER])
 def list_assignments(current_user: User, classroom_id: int):
-    return TeacherQueryService().class_assignments_payload(current_user, classroom_id)
+    page, page_size = pagination_params(request.args)
+    return TeacherQueryService().class_assignments_payload(
+        current_user,
+        classroom_id,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @teacher_bp.get('/assignments/<int:assignment_id>/submissions')
 @auth_required([UserRole.TEACHER])
 def assignment_submissions(current_user: User, assignment_id: int):
+    status = (request.args.get('status') or 'all').strip().lower()
+    if status not in VALID_SUBMISSION_LIST_STATUSES:
+        return {
+            'message': 'Некорректный статус работы.',
+            'allowed_statuses': sorted(VALID_SUBMISSION_LIST_STATUSES),
+        }, 400
+    page, page_size = pagination_params(request.args)
     try:
-        return TeacherQueryService().assignment_submissions_payload(current_user, assignment_id)
+        return TeacherQueryService().assignment_submissions_payload(
+            current_user,
+            assignment_id,
+            page=page,
+            page_size=page_size,
+            status=status,
+        )
     except PermissionError:
         return {'message': 'Forbidden'}, 403
 
@@ -672,7 +1149,7 @@ def assignment_submissions(current_user: User, assignment_id: int):
 @teacher_bp.patch('/submissions/<int:submission_id>/grade')
 @auth_required([UserRole.TEACHER])
 def grade_submission(current_user: User, submission_id: int):
-    submission = AssignmentSubmission.query.get_or_404(submission_id)
+    submission = db.get_or_404(AssignmentSubmission, submission_id)
     if submission.assignment.classroom.teacher_id != current_user.id:
         return {'message': 'Forbidden'}, 403
     data = request.get_json() or {}
@@ -691,8 +1168,26 @@ def lesson_catalog(current_user: User):
     classroom = None
     if classroom_id:
         classroom = Classroom.query.filter_by(id=classroom_id, teacher_id=current_user.id).first_or_404()
-    lessons = _catalog_lessons_for_teacher(current_user, classroom)
-    return {'lessons': [_lesson_catalog_item(lesson) for lesson in lessons]}
+    source = (request.args.get('source') or 'all').strip().lower()
+    if source not in VALID_CATALOG_SOURCES:
+        return {
+            'message': 'Некорректный источник уроков.',
+            'allowed_sources': sorted(VALID_CATALOG_SOURCES),
+        }, 400
+    search = (request.args.get('q') or '').strip()
+    page, page_size = pagination_params(request.args)
+    query = _catalog_lessons_for_teacher(
+        current_user,
+        classroom,
+        source=source,
+        search=search,
+    )
+    lessons, pagination = paginate_query(query, page=page, page_size=page_size)
+    return {
+        'lessons': [_lesson_catalog_item(lesson) for lesson in lessons],
+        'pagination': pagination,
+        'filters': {'source': source, 'q': search},
+    }
 
 
 @teacher_bp.get('/parent-threads')

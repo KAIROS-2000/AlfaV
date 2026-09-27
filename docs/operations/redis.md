@@ -9,7 +9,8 @@
 
 ## Сеть
 
-Redis подключается только к `backend_net`. Сервис `judge-runner` остаётся в изолированной `judge_net` и не имеет доступа к Redis.
+Redis подключается только к внутренней `data_net`. Сервис `judge-runner`
+остаётся в отдельной `judge_worker_net` и не имеет доступа к Redis.
 
 ## Нумерация логических БД (Redis `SELECT`)
 
@@ -59,7 +60,7 @@ Redis подключается только к `backend_net`. Сервис `judg
 
 - `REDIS_URL` обязателен, пароль в URL или через `REDIS_PASSWORD` / `REDIS_PASSWORD_FILE`.
 - Пароль не короче 24 символов, без placeholder-подстрок (как для `SECRET_KEY`).
-- В `docker-compose` пароль читается из Docker secret `redis_password` (файл в контейнере: `/run/secrets/redis_password`) и передаётся в `redis-server --requirepass` через оболочку. Директива `requirepass-file` **не** поддерживается в Redis 7.4.x (см. комментарий в `docker-compose.yml`).
+- В Compose пароль читается из Docker secret `redis_password` (файл в контейнере: `/run/secrets/redis_password`) и передаётся в `redis-server --requirepass` через оболочку. Директива `requirepass-file` **не** поддерживается в Redis 7.4.x (см. комментарий в `compose.yml`).
 
 ## Dev / fallback
 
@@ -78,7 +79,7 @@ Redis подключается только к `backend_net`. Сервис `judg
 
 1. Проверить `docker compose ps` / health контейнера `redis`.
 2. Проверить секрет пароля и монтирование `/run/secrets/redis_password`.
-3. Убедиться, что backend в `backend_net` резолвит хост `redis`.
+3. Убедиться, что backend в `data_net` резолвит хост `redis`.
 4. При деградации API должен отвечать 200 на основные GET при отказе кеша; throttling уходит в PostgreSQL.
 5. После восстановления Redis — без рестарта backend: соединения восстанавливаются lazy/ping.
 

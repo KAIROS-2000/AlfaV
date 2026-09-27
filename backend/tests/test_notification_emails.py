@@ -69,16 +69,20 @@ class NotificationEmailTests(unittest.TestCase):
         self._tempdirs.append(tempdir)
         database_path = Path(tempdir.name) / "notifications.db"
         env = {
+            "CODEQUEST_SKIP_DOTENV": "true",
             "APP_ENV": "development",
             "SECRET_KEY": "UnitTestSecretKey123!UnitTestSecretKey123!",
             "DATABASE_URL": f"sqlite:///{database_path.as_posix()}",
             "CLIENT_URL": "http://localhost:3000",
+            "LEGAL_DOCUMENTS_VERSION": "test-legal-v1",
             "FRONTEND_PUBLIC_URL": "http://localhost:3000",
             "EMAIL_FROM": "no-reply@progyx.test",
             "EMAIL_FROM_NAME": "Progyx Test",
             "UNISENDER_GO_API_KEY": "test-api-key",
             "UNISENDER_GO_API_URL": "https://go1.unisender.example/ru/transactional/api/v1",
             "EMAIL_DRY_RUN": "false",
+            "SEND_MAIL": "true",
+            "SEND_NOTIFICATION_EMAILS": "true",
             "ENABLE_DEMO_DATA": "false",
             "SUPERADMIN_BOOTSTRAP": "false",
             "SESSION_COOKIE_SECURE": "false",
@@ -86,9 +90,20 @@ class NotificationEmailTests(unittest.TestCase):
             "GIGACHAT_VERIFY_SSL": "true",
             "METRICS_DEBUG": "false",
             "THROTTLE_BACKEND": "db",
+            "CODE_JUDGE_RUNNER_URL": "",
+            "CODE_JUDGE_RUNNER_TOKEN": "",
+            "CODE_JUDGE_RUNNER_TOKEN_FILE": "",
+            "REDIS_URL": "",
+            "REDIS_PASSWORD": "",
+            "REDIS_PASSWORD_FILE": "",
+            "POSTGRES_PASSWORD_FILE": "",
+            "READINESS_REQUIRE_REDIS": "false",
+            "READINESS_REQUIRE_JUDGE": "false",
+            "ENABLE_AUDIT_LOG_DAILY_EXPORT_THREAD": "false",
+            "ENABLE_PARENT_WEEKLY_PROGRESS_EMAIL_THREAD": "false",
         }
         env.update(env_overrides)
-        with patch.dict(os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=True):
             import app.core.config as config_module
             import app as app_module
 

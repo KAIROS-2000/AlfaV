@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from sqlalchemy import and_, false, func, or_
+
 from ..core.db import db
+from ..core.pagination import DEFAULT_PAGE_SIZE, paginate_query
 from ..models.support import SupportTicket, SupportTicketMessage, SupportTicketReadState
 from ..models.user import User, UserRole
 
@@ -111,19 +114,51 @@ def ticket_peer_summary(ticket: SupportTicket, *, viewer_id: int) -> dict:
     }
 
 
-def user_inbox_summary(user: User) -> dict:
-    if user.role not in _TICKET_CREATOR_ROLES:
-        return {"total_unread": 0, "tickets": []}
+def _total_unread_for_query(viewer: User, ticket_query) -> int:
+    ticket_ids = ticket_query.with_entities(SupportTicket.id).order_by(None).subquery()
+    return int(
+        db.session.query(func.count(SupportTicketMessage.id))
+        .join(ticket_ids, ticket_ids.c.id == SupportTicketMessage.ticket_id)
+        .outerjoin(
+            SupportTicketReadState,
+            and_(
+                SupportTicketReadState.ticket_id == SupportTicketMessage.ticket_id,
+                SupportTicketReadState.user_id == viewer.id,
+            ),
+        )
+        .filter(
+            SupportTicketMessage.sender_id != viewer.id,
+            or_(
+                SupportTicketReadState.last_read_message_id.is_(None),
+                SupportTicketMessage.id > SupportTicketReadState.last_read_message_id,
+            ),
+        )
+        .scalar()
+        or 0
+    )
 
-    tickets = (
+
+def user_inbox_summary(
+    user: User,
+    *,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> dict:
+    if user.role not in _TICKET_CREATOR_ROLES:
+        return {
+            "total_unread": 0,
+            "tickets": [],
+            "pagination": {"page": page, "page_size": page_size, "total": 0, "total_pages": 1},
+        }
+
+    query = (
         SupportTicket.query.filter_by(user_id=user.id)
         .order_by(SupportTicket.updated_at.desc(), SupportTicket.id.desc())
-        .limit(LIST_TICKET_LIMIT)
-        .all()
     )
+    tickets, pagination = paginate_query(query, page=page, page_size=page_size)
     rows = [ticket_peer_summary(t, viewer_id=user.id) for t in tickets]
-    total_unread = sum(int(r["unread_count"] or 0) for r in rows)
-    return {"total_unread": total_unread, "tickets": rows}
+    total_unread = _total_unread_for_query(user, query)
+    return {"total_unread": total_unread, "tickets": rows, "pagination": pagination}
 
 
 def _can_access_ticket(user: User, ticket: SupportTicket) -> bool:
@@ -290,14 +325,20 @@ def mark_read(user: User, ticket: SupportTicket, last_message_id: int | None) ->
     }
 
 
-def staff_list_tickets(*, status_filter: str | None, limit: int) -> list[SupportTicket]:
+def staff_list_tickets(
+    *,
+    status_filter: str | None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> tuple[list[SupportTicket], dict]:
     q = SupportTicket.query
     sf = (status_filter or "all").strip().lower()
     if sf != "all":
         if sf not in VALID_STATUSES:
-            return []
+            q = q.filter(false())
         q = q.filter(SupportTicket.status == sf)
-    return q.order_by(SupportTicket.updated_at.desc(), SupportTicket.id.desc()).limit(limit).all()
+    q = q.order_by(SupportTicket.updated_at.desc(), SupportTicket.id.desc())
+    return paginate_query(q, page=page, page_size=page_size)
 
 
 def staff_set_status(
@@ -324,17 +365,22 @@ def staff_inbox_summary(viewer: User) -> dict:
     if viewer.role not in _STAFF_ROLES:
         return {"total_unread": 0}
 
-    tickets = (
-        SupportTicket.query.order_by(SupportTicket.updated_at.desc(), SupportTicket.id.desc())
-        .limit(LIST_TICKET_LIMIT)
-        .all()
-    )
-    total = sum(unread_for_ticket(t, viewer.id) for t in tickets)
+    total = _total_unread_for_query(viewer, SupportTicket.query)
     return {"total_unread": total}
 
 
-def staff_ticket_rows(viewer: User, *, status_filter: str | None = None) -> list[dict]:
-    tickets = staff_list_tickets(status_filter=status_filter, limit=LIST_TICKET_LIMIT)
+def staff_ticket_rows(
+    viewer: User,
+    *,
+    status_filter: str | None = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> tuple[list[dict], dict]:
+    tickets, pagination = staff_list_tickets(
+        status_filter=status_filter,
+        page=page,
+        page_size=page_size,
+    )
     rows = []
     for t in tickets:
         owner = t.user
@@ -353,4 +399,4 @@ def staff_ticket_rows(viewer: User, *, status_filter: str | None = None) -> list
                 "latest_message_preview": _preview(latest),
             }
         )
-    return rows
+    return rows, pagination

@@ -15,6 +15,8 @@ _log = logging.getLogger(__name__)
 # Only these paths; keep noise low (health, static, optional self-read of log feed).
 _EXCLUDED_PATH_PREFIXES: tuple[str, ...] = (
     '/api/health',
+    '/api/live',
+    '/api/ready',
     '/api/mascot/',
 )
 _MAX_PATH = 1008

@@ -1,6 +1,7 @@
 'use client'
 
 import { AdminAreaShell } from '@/components/admin-area-shell'
+import { FiveItemPager, SERVER_PAGE_SIZE, useFiveItemWindow } from '@/components/five-item-navigator'
 import { RolePill } from '@/components/role-pill'
 import { StaffDirectThreadPanel } from '@/components/staff-direct-thread-panel'
 import { api, getApiErrorMessage } from '@/lib/api'
@@ -10,6 +11,7 @@ import type {
 	StaffMessagingDirectory,
 	StaffMessagingSummaryResponse,
 	StaffDirectThreadRow,
+	PaginationMeta,
 } from '@/types'
 import { Loader2, Search, Send, Users } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -176,18 +178,23 @@ export function AdminMessagesPageView({
 	const [selectedPeer, setSelectedPeer] = useState<StaffDirectUserRef | null>(null)
 	const [activeThread, setActiveThread] = useState<StaffDirectThreadRow | null>(null)
 	const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null)
+	const [threadsPage, setThreadsPage] = useState(initial?.pagination.page ?? 1)
+	const [teachersPage, setTeachersPage] = useState(initial?.directory.teachers_pagination.page ?? 1)
+	const [staffPage, setStaffPage] = useState(initial?.directory.staff_pagination.page ?? 1)
+	const [searchPage, setSearchPage] = useState(1)
+	const [searchPagination, setSearchPagination] = useState<PaginationMeta | null>(null)
 
 	const load = useCallback(async () => {
 		setError('')
 		try {
-			const next = await api<StaffMessagingSummaryResponse>('/staff-messaging/summary', undefined, 'required')
+			const next = await api<StaffMessagingSummaryResponse>(`/staff-messaging/summary?page=${threadsPage}&teachers_page=${teachersPage}&staff_page=${staffPage}&page_size=${SERVER_PAGE_SIZE}`, undefined, 'required')
 			setData(next)
 		} catch (e) {
 			setError(getApiErrorMessage(e, 'Не удалось загрузить.'))
 		} finally {
 			setLoading(false)
 		}
-	}, [])
+	}, [staffPage, teachersPage, threadsPage])
 
 	useEffect(() => {
 		void load()
@@ -199,6 +206,10 @@ export function AdminMessagesPageView({
 	const dirTeachers = directory?.teachers ?? []
 	const dirStaff = directory?.staff ?? []
 	const threads = data?.threads ?? initial?.threads ?? []
+	const teachersWindow = useFiveItemWindow({ items: dirTeachers, pagination: directory?.teachers_pagination, loading, onPageChange: setTeachersPage })
+	const staffWindow = useFiveItemWindow({ items: dirStaff, pagination: directory?.staff_pagination, loading, onPageChange: setStaffPage })
+	const threadsWindow = useFiveItemWindow({ items: threads, pagination: data?.pagination, loading, onPageChange: setThreadsPage })
+	const searchWindow = useFiveItemWindow({ items: searchHits, pagination: searchPagination, loading: searching, onPageChange: setSearchPage, resetKey: search.trim() })
 
 	useEffect(() => {
 		if (searchDebounce.current) {
@@ -213,12 +224,13 @@ export function AdminMessagesPageView({
 			void (async () => {
 				setSearching(true)
 				try {
-					const res = await api<{ users: StaffDirectUserRef[] }>(
-						`/staff-messaging/search-users?q=${encodeURIComponent(q)}`,
+					const res = await api<{ users: StaffDirectUserRef[]; pagination: PaginationMeta }>(
+						`/staff-messaging/search-users?q=${encodeURIComponent(q)}&page=${searchPage}&page_size=${SERVER_PAGE_SIZE}`,
 						undefined,
 						'required',
 					)
 					setSearchHits(res.users ?? [])
+					setSearchPagination(res.pagination)
 				} catch {
 					setSearchHits([])
 				} finally {
@@ -229,7 +241,7 @@ export function AdminMessagesPageView({
 		return () => {
 			if (searchDebounce.current) clearTimeout(searchDebounce.current)
 		}
-	}, [search])
+	}, [search, searchPage])
 
 	const onPickUser = useCallback(
 		(u: StaffDirectUserRef) => {
@@ -306,7 +318,7 @@ export function AdminMessagesPageView({
 							className='h-10 w-full rounded-2xl border border-slate-200 bg-slate-50 pl-9 pr-3 text-sm'
 							placeholder='Поиск по email (от 2 симв.)'
 							value={search}
-							onChange={e => setSearch(e.target.value)}
+							onChange={e => { setSearch(e.target.value); setSearchPage(1) }}
 						/>
 						{searching ? (
 							<Loader2
@@ -320,7 +332,7 @@ export function AdminMessagesPageView({
 						<div className='mb-4 space-y-1'>
 							<p className='text-xs font-black uppercase tracking-[0.12em] text-slate-500'>Найдено</p>
 							{searchHits.length ? (
-								searchHits.map(u => {
+								searchWindow.visibleItems.map(u => {
 									const active = selectedPeer?.id === u.id
 									return (
 										<button
@@ -344,31 +356,34 @@ export function AdminMessagesPageView({
 							) : (
 								<p className='text-sm text-slate-500'>{searching ? '…' : 'Никого не найдено.'}</p>
 							)}
+							<FiveItemPager window={searchWindow} loading={searching} itemLabel='пользователей' className='mt-2' />
 						</div>
 					) : null}
 
 					<div className='max-h-[40vh] space-y-5 overflow-y-auto pr-1 lg:max-h-[65vh]'>
 						<DirectoryList
 							label='Учителя'
-							users={dirTeachers}
+							users={teachersWindow.visibleItems}
 							selectedId={selectedPeer?.id ?? null}
 							onPick={onPickUser}
 							threads={threads}
 						/>
+						<FiveItemPager window={teachersWindow} loading={loading} itemLabel='учителей' />
 						<DirectoryList
 							label='Администрация'
-							users={dirStaff}
+							users={staffWindow.visibleItems}
 							selectedId={selectedPeer?.id ?? null}
 							onPick={onPickUser}
 							threads={threads}
 						/>
+						<FiveItemPager window={staffWindow} loading={loading} itemLabel='сотрудников' />
 						{threads.length ? (
 							<div>
 								<p className='mb-2 text-xs font-black uppercase tracking-[0.12em] text-slate-500'>
 									Переписки
 								</p>
 								<div className='space-y-1'>
-									{threads.map(row => {
+									{threadsWindow.visibleItems.map(row => {
 										const active = activeThread?.thread_id === row.thread_id
 										return (
 											<button
@@ -397,6 +412,7 @@ export function AdminMessagesPageView({
 										)
 									})}
 								</div>
+								<FiveItemPager window={threadsWindow} loading={loading} itemLabel='переписок' className='mt-2' />
 							</div>
 						) : null}
 					</div>

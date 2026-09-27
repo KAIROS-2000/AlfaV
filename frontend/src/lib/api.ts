@@ -1,5 +1,11 @@
 import { PUBLIC_API_URL } from './public-env'
 import { setAnonymousSession } from './session-store'
+import {
+  DEFAULT_BROWSER_REQUEST_TIMEOUT_MS,
+  RequestTimeoutError,
+  UPLOAD_BROWSER_REQUEST_TIMEOUT_MS,
+  withRequestTimeout,
+} from './request-timeout'
 import type {
   ForgotPasswordResponse,
   ResendVerificationResponse,
@@ -62,6 +68,12 @@ function buildHeaders(init?: RequestInit) {
     headers.set(CSRF_HEADER_NAME, csrfToken)
   }
   return headers
+}
+
+function requestTimeoutMs(init?: RequestInit) {
+  return typeof FormData !== 'undefined' && init?.body instanceof FormData
+    ? UPLOAD_BROWSER_REQUEST_TIMEOUT_MS
+    : DEFAULT_BROWSER_REQUEST_TIMEOUT_MS
 }
 
 const SESSION_TERMINATION_CODES = new Set(['invalid_token', 'session_revoked', 'csrf_invalid'])
@@ -152,6 +164,9 @@ function isNetworkTransportErrorMessage(message: string) {
 }
 
 export function getApiErrorMessage(error: unknown, fallback = 'Произошла ошибка.'): string {
+  if (error instanceof RequestTimeoutError) {
+    return 'Сервер не ответил вовремя. Проверьте соединение и повторите попытку.'
+  }
   if (error instanceof ApiError) {
     const direct = error.message?.trim()
     if (direct) return direct
@@ -180,12 +195,16 @@ async function parsePayload(response: Response): Promise<unknown> {
 async function refreshSession() {
   if (refreshRequest) return refreshRequest
 
-  refreshRequest = fetch(`${API_URL}/auth/refresh`, {
-    method: 'POST',
-    headers: buildHeaders({ method: 'POST' }),
-    cache: 'no-store',
-    credentials: 'same-origin',
-  })
+  refreshRequest = withRequestTimeout(
+    signal => fetch(`${API_URL}/auth/refresh`, {
+      method: 'POST',
+      headers: buildHeaders({ method: 'POST' }),
+      cache: 'no-store',
+      credentials: 'same-origin',
+      signal,
+    }),
+    DEFAULT_BROWSER_REQUEST_TIMEOUT_MS,
+  )
     .then((response) => response.ok)
     .catch(() => false)
     .finally(() => {
@@ -210,12 +229,16 @@ export async function clearSessionSilently(options: ClearSessionOptions = {}) {
   setAnonymousSession()
 
   try {
-    await fetch(`${API_URL}/auth/logout`, {
-      method: 'POST',
-      headers: buildHeaders({ method: 'POST' }),
-      cache: 'no-store',
-      credentials: 'same-origin',
-    })
+    await withRequestTimeout(
+      signal => fetch(`${API_URL}/auth/logout`, {
+        method: 'POST',
+        headers: buildHeaders({ method: 'POST' }),
+        cache: 'no-store',
+        credentials: 'same-origin',
+        signal,
+      }),
+      DEFAULT_BROWSER_REQUEST_TIMEOUT_MS,
+    )
   } catch {
     // Ignore logout cleanup failures when the session is already invalid.
   }
@@ -228,14 +251,17 @@ export async function clearSessionSilently(options: ClearSessionOptions = {}) {
 export async function api<T>(path: string, init: RequestInit = {}, auth: ApiAuthOption = 'none'): Promise<T> {
   const authMode = resolveAuthMode(auth)
   const send = async () => {
-    const response = await fetch(`${API_URL}${path}`, {
-      ...init,
-      headers: buildHeaders(init),
-      cache: init.cache ?? 'no-store',
-      credentials: 'same-origin',
-    })
-    const payload = await parsePayload(response)
-    return { response, payload }
+    return withRequestTimeout(async signal => {
+      const response = await fetch(`${API_URL}${path}`, {
+        ...init,
+        headers: buildHeaders(init),
+        cache: init.cache ?? 'no-store',
+        credentials: 'same-origin',
+        signal,
+      })
+      const payload = await parsePayload(response)
+      return { response, payload }
+    }, requestTimeoutMs(init), init.signal)
   }
 
   let { response, payload } = await send()

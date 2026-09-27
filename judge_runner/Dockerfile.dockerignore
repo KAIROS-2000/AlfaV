@@ -1,0 +1,8 @@
+# This file applies when judge_runner/Dockerfile is built with repository-root context.
+*
+!judge_runner/
+!judge_runner/Dockerfile
+!judge_runner/app.py
+!judge_runner/network_isolation_smoke.py
+!shared/
+!shared/**

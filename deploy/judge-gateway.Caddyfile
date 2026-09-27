@@ -1,0 +1,31 @@
+{
+	admin off
+	auto_https off
+}
+
+:8091 {
+	handle /health {
+		reverse_proxy judge-runner:8090 {
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 3s
+			}
+		}
+	}
+
+	handle /execute {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy judge-runner:8090 {
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 20s
+			}
+		}
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}

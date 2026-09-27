@@ -26,6 +26,10 @@ set -eu
 
 BACKUP_DIR="${BACKUP_DIR:-/backups}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-14}"
+if [ -z "${PGPASSWORD:-}" ] && [ -n "${PGPASSWORD_FILE:-}" ]; then
+    PGPASSWORD="$(tr -d '\r' < "${PGPASSWORD_FILE}")"
+    export PGPASSWORD
+fi
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="${BACKUP_DIR}/progyx-${TS}.sql.custom.gz"
 TMP="${OUT}.tmp"

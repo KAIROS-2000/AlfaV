@@ -33,7 +33,8 @@
 
 cp .env.example .env
 
-docker compose up --build
+sh scripts/generate-secrets.sh ./secrets
+docker compose -f compose.yml -f compose.dev.yml up --build
 ```
 
 После запуска:
@@ -41,23 +42,59 @@ docker compose up --build
 - Frontend: http://localhost:3000
 - Backend API: http://localhost:8000/api
 - **Суперадмин:** логин `superadmin@codequest.local` или `superadmin`, пароль — значение `SUPERADMIN_PASSWORD` в `.env` (в `.env.example` для локалки: `LocalOnlySuperAdmin123!`). Учётка появляется только при `SUPERADMIN_BOOTSTRAP=true` и успешном `bootstrap-app`; роль `admin` из блока `DEMO_ADMIN_*` — это отдельный демо-пользователь.
-- фронтенд в `development` использует `NEXT_PUBLIC_API_URL=http://localhost:3000/api`
-- фронтенд в `production` должен получать `NEXT_PUBLIC_API_URL` только из env
+- browser API calls use the portable same-origin `NEXT_PUBLIC_API_URL=/api`; no API hostname is baked into the image
 - server-side proxy фронтенда ходит в backend через `INTERNAL_API_URL`
 - `judge-runner` поднимается внутри Docker-сети и не публикует порт наружу
+
+## Development and production
+
+Development uses source bind mounts, Flask reload, `next dev`, and named
+`node_modules`/`.next` volumes, so normal React/Python edits need no rebuild.
+
+```bash
+docker compose -f compose.yml -f compose.dev.yml up --build
+docker compose -f compose.yml -f compose.dev.yml --profile backup up -d
+```
+
+Production runs only prebuilt, signed `@sha256:` image digests (no source
+bind mounts), terminates TLS through Caddy, enables local plus encrypted
+off-host backups, and uses named media/audit volumes. Production never reuses
+the development `.env`:
+
+```bash
+cp .env.production.example /secure/path/progyx-production.env
+# Replace every placeholder and point *_FILE_HOST variables at external secret files.
+sh scripts/production-preflight.sh /secure/path/progyx-production.env
+docker compose --env-file /secure/path/progyx-production.env -f compose.yml -f compose.prod.yml pull
+docker compose --env-file /secure/path/progyx-production.env -f compose.yml -f compose.prod.yml up -d --wait --no-build
+```
+
+The full production procedure, evidence checklist, first Restic initialization,
+and rollback rules are documented in
+[`docs/operations/production-release.md`](docs/operations/production-release.md).
+Monitoring signals, SLOs and the mandatory alert-route test are in
+[`docs/operations/observability.md`](docs/operations/observability.md).
+
+Backup/restore commands (restore is destructive):
+
+```bash
+docker compose --env-file /secure/path/progyx-production.env -f compose.yml -f compose.prod.yml run --rm --entrypoint sh db-backup /usr/local/bin/backup.sh
+docker compose --env-file /secure/path/progyx-production.env -f compose.yml -f compose.prod.yml exec -e RESTORE_ASSUME_YES=1 db-backup sh /usr/local/bin/restore.sh /backups/<file>.sql.custom.gz
+```
 
 ## Production режим
 
 - для локального старта используйте `APP_ENV=development`
 - для frontend также выставляйте `NEXT_PUBLIC_APP_ENV=development`
 - при `APP_ENV=production`:
-  - `CLIENT_URL`, `NEXT_PUBLIC_API_URL` и `INTERNAL_API_URL` должны приходить из env
+  - `PUBLIC_ORIGIN`, `CLIENT_URL` и runtime-only `INTERNAL_API_URL` должны приходить из env
   - `ENABLE_DEMO_DATA=false`
-- фронтенд в Docker собирается через `next build` и запускается через `next start`
+  - `SUPERADMIN_BOOTSTRAP=false`; первый администратор создаётся отдельной аудируемой CLI-командой из production runbook
+- frontend is built once with `next build` and runs the standalone `node server.js` runtime
 - backend запускается через Gunicorn, а `flask.run()` запрещён в production
 - если в `APP_ENV=production` оставлен слабый `SECRET_KEY` (`dev-secret-key` или `super-secret-key-change-me`), backend завершит запуск с ошибкой
-- в `APP_ENV=production` обязательны `SESSION_COOKIE_SECURE=true` и `GIGACHAT_VERIFY_SSL=true`
-- `SUPERADMIN_BOOTSTRAP` в production требует явных и достаточно сильных `SUPERADMIN_EMAIL` и `SUPERADMIN_PASSWORD`
+- в `APP_ENV=production` обязательны `SESSION_COOKIE_SECURE=true`, полная email/legal-конфигурация и закрытые release-attestation gates
+- GigaChat endpoint жёстко отключён и его credentials не загружаются приложением
 
 ## Email-уведомления
 

@@ -36,6 +36,15 @@ AVATARS: list[dict[str, Any]] = [
     {"key": "мужчина3", "name": "Мужчина 3", "type": "avatar", "price": 0, "file": "мужчина3.png"},
     {"key": "мужчина4", "name": "Мужчина 4", "type": "avatar", "price": 0, "file": "мужчина4.png"},
     {"key": "мужчина5", "name": "Мужчина 5", "type": "avatar", "price": 0, "file": "мужчина5.png"},
+    {"key": "neon-hacker", "name": "Неоновый хакер", "type": "avatar", "price": 200, "file": "neon-hacker.png"},
+    {"key": "prism-oracle", "name": "Призматический оракул", "type": "avatar", "price": 200, "file": "prism-oracle.png"},
+    {"key": "cosmic-cube", "name": "Космический куб", "type": "avatar", "price": 200, "file": "cosmic-cube.png"},
+    {"key": "neon-bot", "name": "Неоновый бот", "type": "avatar", "price": 200, "file": "neon-bot.png"},
+    {"key": "glitch-phantom", "name": "Глитч-фантом", "type": "avatar", "price": 200, "file": "glitch-phantom.png"},
+    {"key": "void-mage", "name": "Маг пустоты", "type": "avatar", "price": 200, "file": "void-mage.png"},
+    {"key": "crystal-king", "name": "Кристальный король", "type": "avatar", "price": 200, "file": "crystal-king.png"},
+    {"key": "cyber-dragon", "name": "Кибер-дракон", "type": "avatar", "price": 200, "file": "cyber-dragon.png"},
+    {"key": "shadow-rogue", "name": "Теневой разбойник", "type": "avatar", "price": 200, "file": "shadow-rogue.png"},
 ]
 
 FRAMES: list[dict[str, Any]] = [

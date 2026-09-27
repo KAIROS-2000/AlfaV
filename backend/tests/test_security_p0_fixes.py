@@ -45,10 +45,12 @@ class P0FixesBase(unittest.TestCase):
         self._tempdirs.append(tempdir)
         database_path = Path(tempdir.name) / 'test.db'
         env = {
+            'CODEQUEST_SKIP_DOTENV': 'true',
             'APP_ENV': 'development',
             'SECRET_KEY': 'UnitTestSecretKey123!UnitTestSecretKey123!',
             'DATABASE_URL': f'sqlite:///{database_path.as_posix()}',
             'CLIENT_URL': 'http://localhost:3000',
+            'LEGAL_DOCUMENTS_VERSION': 'test-legal-v1',
             'ENABLE_DEMO_DATA': 'false',
             'SUPERADMIN_BOOTSTRAP': 'false',
             'SESSION_COOKIE_SECURE': 'false',
@@ -58,10 +60,19 @@ class P0FixesBase(unittest.TestCase):
             'CODE_JUDGE_RUNNER_TOKEN': '',
             'METRICS_DEBUG': 'false',
             'TRUST_PROXY': 'false',
+            'SEND_MAIL': 'false',
+            'REDIS_URL': '',
+            'REDIS_PASSWORD': '',
+            'REDIS_PASSWORD_FILE': '',
+            'POSTGRES_PASSWORD_FILE': '',
+            'CODE_JUDGE_RUNNER_TOKEN_FILE': '',
+            'READINESS_REQUIRE_REDIS': 'false',
+            'ENABLE_AUDIT_LOG_DAILY_EXPORT_THREAD': 'false',
+            'ENABLE_PARENT_WEEKLY_PROGRESS_EMAIL_THREAD': 'false',
         }
         env.update(env_overrides)
 
-        with patch.dict(os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=True):
             import app.core.config as config_module
             import app as app_module
 
@@ -414,7 +425,9 @@ class CurriculumAccessControlTests(P0FixesBase):
                 passing_score=70,
                 theory_blocks=[],
                 interactive_steps=[],
-                is_published=False,
+                # Classroom membership grants access only after publication;
+                # drafts remain confined to the teacher authoring API.
+                is_published=True,
             )
             db.session.add_all(
                 [public_lesson, draft_lesson, private_lesson, custom_lesson]
@@ -792,6 +805,19 @@ class ClassJoinThrottleTests(P0FixesBase):
 
 
 class MediaWhitelistTests(P0FixesBase):
+    def test_cosmetic_assets_fall_back_to_assets_bundled_with_the_app(self):
+        tempdir = tempfile.TemporaryDirectory()
+        self._tempdirs.append(tempdir)
+        app = self.create_app(MEDIA_DIR=tempdir.name)
+        with app.test_client() as client:
+            avatar = client.get('/api/media/avatars/женщина1.png')
+            frame = client.get('/api/media/frames/деревянная.png')
+
+        self.assertEqual(avatar.status_code, 200)
+        self.assertEqual(frame.status_code, 200)
+        self.assertTrue(avatar.mimetype.startswith('image/'))
+        self.assertTrue(frame.mimetype.startswith('image/'))
+
     def test_mascot_route_rejects_html_extension(self):
         app = self.create_app()
         with app.test_client() as client:

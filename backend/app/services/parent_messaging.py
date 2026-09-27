@@ -180,9 +180,9 @@ def _unread_for(thread: ParentTeacherThread, user_id: int) -> int:
 
 
 def _thread_metadata(thread: ParentTeacherThread) -> dict:
-    child = User.query.get(thread.child_user_id)
-    teacher = User.query.get(thread.teacher_id)
-    classroom = Classroom.query.get(thread.classroom_id)
+    child = db.session.get(User, thread.child_user_id)
+    teacher = db.session.get(User, thread.teacher_id)
+    classroom = db.session.get(Classroom, thread.classroom_id)
     return {
         "id": thread.id,
         "is_parent_conversation": True,
@@ -287,7 +287,7 @@ def open_thread(user: User) -> dict | tuple:
         return {"message": "Связь с педагогом отключена в настройках согласия."}, 403
     if not ClassMembership.query.filter_by(classroom_id=classroom_id, student_id=child_id).first():
         return {"message": "Ребёнок не в этом классе."}, 403
-    classroom = Classroom.query.get(classroom_id)
+    classroom = db.session.get(Classroom, classroom_id)
     if not classroom:
         return {"message": "Класс не найден."}, 404
     teacher_id = classroom.teacher_id
@@ -320,9 +320,9 @@ def summary_for_teacher(user: User) -> dict:
     )
     out = []
     for t in threads:
-        child = User.query.get(t.child_user_id)
-        parent = User.query.get(t.parent_user_id)
-        classroom = Classroom.query.get(t.classroom_id)
+        child = db.session.get(User, t.child_user_id)
+        parent = db.session.get(User, t.parent_user_id)
+        classroom = db.session.get(Classroom, t.classroom_id)
         latest = (
             ParentTeacherMessage.query.filter_by(thread_id=t.id)
             .order_by(ParentTeacherMessage.id.desc())

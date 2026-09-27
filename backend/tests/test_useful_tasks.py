@@ -108,6 +108,41 @@ class UsefulTasksBase(unittest.TestCase):
 
 
 class UsefulPublicListingTests(UsefulTasksBase):
+    def test_public_and_admin_lists_share_fifteen_item_cap(self):
+        app = self.create_app()
+        from app.models.user import UserRole
+
+        self.make_user(app, role=UserRole.STUDENT, email='paging-student@example.com')
+        self.make_user(app, role=UserRole.ADMIN, email='paging-admin@example.com')
+        with app.app_context():
+            from app.core.db import db
+            from app.models.useful import UsefulTask
+
+            db.session.add_all([
+                UsefulTask(
+                    slug=f'paging-task-{index}',
+                    title=f'Paging task {index}',
+                    summary='Pagination',
+                    body='',
+                    age_groups=['middle'],
+                    difficulty='medium',
+                    is_published=True,
+                )
+                for index in range(20)
+            ])
+            db.session.commit()
+
+        with app.test_client() as client:
+            self.login(client, email='paging-student@example.com')
+            public = client.get('/api/useful?page_size=100').get_json()
+            self.assertEqual(len(public['tasks']), 15)
+            self.assertEqual(public['pagination'], {'page': 1, 'page_size': 15, 'total': 20, 'total_pages': 2})
+
+            self.login(client, email='paging-admin@example.com')
+            admin = client.get('/api/useful/admin?page_size=100').get_json()
+            self.assertEqual(len(admin['tasks']), 15)
+            self.assertEqual(admin['pagination']['total'], 20)
+
     def test_unpublished_tasks_hidden_from_listing(self):
         app = self.create_app()
         from app.models.user import UserRole
@@ -259,9 +294,10 @@ class UsefulAdminCrudTests(UsefulTasksBase):
         self.assertEqual(r.status_code, 200)
 
         with app.app_context():
+            from app.core.db import db
             from app.models.useful import UsefulTask
 
-            self.assertIsNone(UsefulTask.query.get(task_id))
+            self.assertIsNone(db.session.get(UsefulTask, task_id))
 
     def test_unique_slug_collision_is_resolved(self):
         app = self.create_app()

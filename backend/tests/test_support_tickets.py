@@ -81,6 +81,40 @@ class SupportTicketApiTests(unittest.TestCase):
         response = client.post('/api/auth/login', json={'login': login, 'password': password})
         self.assertEqual(response.status_code, 200)
 
+    def test_ticket_directories_are_paginated_and_capped(self):
+        app = self.create_app()
+        self.create_user(app, email='paging-stu@example.com', password='StudentPass123!', role='student')
+        self.create_user(app, email='paging-adm@example.com', password='AdminPass123!', role='admin')
+        with app.app_context():
+            from app.core.db import db
+            from app.models.support import SupportTicket
+            from app.models.user import User
+
+            owner = User.query.filter_by(email='paging-stu@example.com').one()
+            db.session.add_all([
+                SupportTicket(
+                    user_id=owner.id,
+                    category='technical',
+                    subject=f'Paging ticket {index}',
+                    description='Pagination fixture',
+                    status='open',
+                )
+                for index in range(20)
+            ])
+            db.session.commit()
+
+        with app.test_client() as client:
+            self.login(client, 'paging-stu@example.com', 'StudentPass123!')
+            mine = client.get('/api/support/tickets?page_size=100').get_json()
+            self.assertEqual(len(mine['tickets']), 15)
+            self.assertEqual(mine['pagination']['total'], 20)
+            self.assertEqual(mine['pagination']['page_size'], 15)
+
+            self.login(client, 'paging-adm@example.com', 'AdminPass123!')
+            staff = client.get('/api/support/staff/tickets?page_size=100').get_json()
+            self.assertEqual(len(staff['tickets']), 15)
+            self.assertEqual(staff['pagination']['total'], 20)
+
     def test_ticket_lifecycle_and_messaging_summary(self):
         app = self.create_app()
         self.create_user(app, email='stu@example.com', password='StudentPass123!', role='student')

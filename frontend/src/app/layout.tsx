@@ -13,6 +13,7 @@ import {
   SITE_TITLE,
 } from '@/lib/seo'
 import { getThemeInitScript } from '@/lib/theme'
+import { getPublicSiteConfig } from '@/lib/server-site-config'
 import './globals.css'
 
 export const metadata: Metadata = {
@@ -71,6 +72,7 @@ export const viewport: Viewport = {
 export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   const headersList = await headers()
   const nonce = headersList.get('x-nonce') ?? ''
+  const siteConfig = getPublicSiteConfig()
 
   return (
     <html lang="ru" data-theme="light" suppressHydrationWarning>
@@ -87,7 +89,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
         <MascotOverlay />
         <SiteChrome />
         {children}
-        <SiteFooter />
+        <SiteFooter config={siteConfig} />
       </body>
     </html>
   )

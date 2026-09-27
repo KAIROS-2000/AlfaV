@@ -280,7 +280,7 @@ export function AdminTelemetryPanel({ telemetry }: { telemetry: AdminTelemetryDa
 
   return (
     <div className="space-y-6">
-      <section className="codequest-card p-6 sm:p-7">
+      <section className="codequest-card px-6 py-8 sm:px-8 sm:py-10">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-3xl space-y-3">
             <p className="brand-eyebrow">Телеметрия</p>

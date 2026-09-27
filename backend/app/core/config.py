@@ -8,8 +8,17 @@ from dotenv import load_dotenv
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = BACKEND_DIR.parent
 
-load_dotenv(PROJECT_ROOT / '.env', override=False)
-load_dotenv(BACKEND_DIR / '.env', override=False)
+# Tests and other isolated processes can opt out of ambient repository dotenv
+# files. Production still loads the same files by default.
+_SKIP_DOTENV = os.getenv('CODEQUEST_SKIP_DOTENV', '').strip().lower() in {
+    '1',
+    'true',
+    'yes',
+    'on',
+}
+if not _SKIP_DOTENV:
+    load_dotenv(PROJECT_ROOT / '.env', override=False)
+    load_dotenv(BACKEND_DIR / '.env', override=False)
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
@@ -24,6 +33,18 @@ def _env(name: str) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _bounded_positive_int(name: str, default: int, *, maximum: int | None = None) -> int:
+    raw_value = _env(name)
+    try:
+        value = int(raw_value) if raw_value is not None else default
+    except ValueError as exc:
+        raise RuntimeError(f'{name} must be a positive integer.') from exc
+    if value <= 0 or (maximum is not None and value > maximum):
+        bounds = f' between 1 and {maximum}' if maximum is not None else ' positive'
+        raise RuntimeError(f'{name} must be{bounds}.')
+    return value
 
 
 def _read_secret_file(env_name: str) -> str | None:
@@ -51,6 +72,13 @@ def resolve_postgres_password() -> str | None:
         return secret
     pw = _env("POSTGRES_PASSWORD")
     return pw.replace("\r", "") if pw else None
+
+
+def resolve_judge_runner_token() -> str | None:
+    secret = _read_secret_file('CODE_JUDGE_RUNNER_TOKEN_FILE')
+    if secret:
+        return secret
+    return _env('CODE_JUDGE_RUNNER_TOKEN')
 
 
 def _default_database_uri() -> str:
@@ -102,12 +130,22 @@ class Config:
     JWT_SIGNING_KEYS = _env('JWT_SIGNING_KEYS') or ''
     SQLALCHEMY_DATABASE_URI = _env('DATABASE_URL') or _default_database_uri()
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # This global limit also covers JSON and multipart overhead. It remains
+    # above the current five MiB attachment limit enforced by the lessons API.
+    MAX_CONTENT_LENGTH = _bounded_positive_int(
+        'MAX_CONTENT_LENGTH_BYTES',
+        8 * 1024 * 1024,
+        maximum=64 * 1024 * 1024,
+    )
     ACCESS_TOKEN_MINUTES = int(_env('ACCESS_TOKEN_MINUTES') or '30')
     REFRESH_TOKEN_DAYS = int(_env('REFRESH_TOKEN_DAYS') or '14')
     # Non-prod default allows both localhost and 127.0.0.1 so dev sessions are not blocked
     # by enforce_origin_for_unsafe_api_requests when the user opens the app via either host.
     CLIENT_URL = _env('CLIENT_URL') or (
         None if IS_PRODUCTION else 'http://localhost:3000,http://127.0.0.1:3000'
+    )
+    LEGAL_DOCUMENTS_VERSION = _env('LEGAL_DOCUMENTS_VERSION') or (
+        None if IS_PRODUCTION else 'development-v1'
     )
     SESSION_COOKIE_SECURE = _as_bool(os.getenv('SESSION_COOKIE_SECURE'), default=IS_PRODUCTION)
     SESSION_COOKIE_SAMESITE = _env('SESSION_COOKIE_SAMESITE') or 'Strict'
@@ -134,19 +172,20 @@ class Config:
     CODE_JUDGE_DEFAULT_MEMORY_LIMIT_MB = int(_env('CODE_JUDGE_DEFAULT_MEMORY_LIMIT_MB') or '128')
     CODE_JUDGE_MAX_OUTPUT_CHARS = int(_env('CODE_JUDGE_MAX_OUTPUT_CHARS') or '4000')
     CODE_JUDGE_RUNNER_URL = _env('CODE_JUDGE_RUNNER_URL')
-    CODE_JUDGE_RUNNER_TOKEN = _env('CODE_JUDGE_RUNNER_TOKEN')
+    CODE_JUDGE_RUNNER_TOKEN = resolve_judge_runner_token()
     CODE_JUDGE_RUNNER_TIMEOUT_MS = int(_env('CODE_JUDGE_RUNNER_TIMEOUT_MS') or '15000')
     CODE_JUDGE_ALLOW_LOCAL_FALLBACK = False
+    READINESS_REQUIRE_JUDGE = _as_bool(
+        _env('READINESS_REQUIRE_JUDGE'),
+        default=IS_PRODUCTION,
+    )
+    READINESS_JUDGE_TIMEOUT_MS = _bounded_positive_int(
+        'READINESS_JUDGE_TIMEOUT_MS',
+        500,
+        maximum=5000,
+    )
     METRICS_DEBUG = _as_bool(os.getenv('METRICS_DEBUG'), default=not IS_PRODUCTION)
 
-    GIGACHAT_AUTH_KEY = _env('GIGACHAT_AUTH_KEY')
-    GIGACHAT_SCOPE = _env('GIGACHAT_SCOPE') or 'GIGACHAT_API_PERS'
-    GIGACHAT_MODEL = _env('GIGACHAT_MODEL') or 'GigaChat'
-    GIGACHAT_AUTH_URL = _env('GIGACHAT_AUTH_URL') or 'https://ngw.devices.sberbank.ru:9443/api/v2/oauth'
-    GIGACHAT_API_URL = (_env('GIGACHAT_API_URL') or 'https://gigachat.devices.sberbank.ru/api/v1').rstrip('/')
-    GIGACHAT_TIMEOUT_MS = int(_env('GIGACHAT_TIMEOUT_MS') or '30000')
-    GIGACHAT_VERIFY_SSL = _as_bool(os.getenv('GIGACHAT_VERIFY_SSL'), default=True)
-    GIGACHAT_CA_BUNDLE = _env('GIGACHAT_CA_BUNDLE')
     LOGIN_RATE_LIMIT_WINDOW_SECONDS = int(_env('LOGIN_RATE_LIMIT_WINDOW_SECONDS') or '900')
     LOGIN_RATE_LIMIT_MAX_FAILURES = int(_env('LOGIN_RATE_LIMIT_MAX_FAILURES') or '8')
     LOGIN_RATE_LIMIT_BLOCK_SECONDS = int(_env('LOGIN_RATE_LIMIT_BLOCK_SECONDS') or '900')
@@ -184,9 +223,12 @@ class Config:
     EMAIL_FROM = _env('EMAIL_FROM') or ''
     EMAIL_FROM_NAME = _env('EMAIL_FROM_NAME') or 'Progyx'
     EMAIL_REPLY_TO = _env('EMAIL_REPLY_TO') or ''
-    FRONTEND_PUBLIC_URL = (_env('FRONTEND_PUBLIC_URL') or _env('CLIENT_URL') or '').strip().rstrip('/')
+    FRONTEND_PUBLIC_URL = (_env('FRONTEND_PUBLIC_URL') or _env('CLIENT_URL') or '').strip()
     EMAIL_VERIFICATION_TOKEN_TTL_MINUTES = int(_env('EMAIL_VERIFICATION_TOKEN_TTL_MINUTES') or '1440')
     PASSWORD_RESET_TOKEN_TTL_MINUTES = int(_env('PASSWORD_RESET_TOKEN_TTL_MINUTES') or '30')
+    PARENT_PASSWORD_SETUP_TOKEN_TTL_MINUTES = int(
+        _env('PARENT_PASSWORD_SETUP_TOKEN_TTL_MINUTES') or '1440'
+    )
     EMAIL_DRY_RUN = _as_bool(os.getenv('EMAIL_DRY_RUN'), default=False)
     # If false: no outgoing mail; new users skip email verification; see /api/auth/register.
     SEND_MAIL = _as_bool(os.getenv('SEND_MAIL'), default=True)
@@ -210,6 +252,10 @@ class Config:
     REDIS_SOCKET_TIMEOUT_MS = int(_env('REDIS_SOCKET_TIMEOUT_MS') or '200')
     REDIS_CONNECT_TIMEOUT_MS = int(_env('REDIS_CONNECT_TIMEOUT_MS') or '200')
     REDIS_HEALTH_PING_MS = int(_env('REDIS_HEALTH_PING_MS') or '100')
+    READINESS_REQUIRE_REDIS = _as_bool(
+        _env('READINESS_REQUIRE_REDIS'),
+        default=IS_PRODUCTION,
+    )
     REDIS_DB_LEADERBOARD = int(_env('REDIS_DB_LEADERBOARD') or '0')
     REDIS_DB_SESSION_VERSION = int(_env('REDIS_DB_SESSION_VERSION') or '1')
     REDIS_DB_THROTTLE = int(_env('REDIS_DB_THROTTLE') or '2')

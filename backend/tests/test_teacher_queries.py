@@ -189,6 +189,138 @@ class TeacherReadPathTests(unittest.TestCase):
         with app.app_context():
             self.assertEqual(Classroom.query.count(), 1)
 
+    def test_teacher_collection_pagination_keeps_global_totals(self):
+        app = self.create_app()
+        teacher_id, classroom_id, assignment_id = self.create_teacher_fixture(app)
+
+        with app.app_context():
+            from app.core.db import db
+            from app.core.security import hash_password
+            from app.models.learning import Assignment, AssignmentSubmission, ClassMembership, Classroom
+            from app.models.user import User, UserRole
+
+            extra_classes = [
+                Classroom(
+                    name=f'Class {index}',
+                    description='Pagination class',
+                    code=f'PAGE{index:03d}',
+                    teacher_id=teacher_id,
+                )
+                for index in range(20)
+            ]
+            db.session.add_all(extra_classes)
+            students = [
+                User(
+                    full_name=f'Paging Student {index:02d}',
+                    email=f'paging-student-{index}@example.com',
+                    password_hash=hash_password('StudentPass123!'),
+                    role=UserRole.STUDENT,
+                    age_group='middle',
+                )
+                for index in range(20)
+            ]
+            db.session.add_all(students)
+            db.session.flush()
+            db.session.add_all([
+                ClassMembership(classroom_id=classroom_id, student_id=student.id)
+                for student in students
+            ])
+            extra_assignments = [
+                Assignment(
+                    classroom_id=classroom_id,
+                    lesson_id=None,
+                    title=f'Paging assignment {index}',
+                    description='Practice assignment',
+                    difficulty='medium',
+                    due_date='2020-01-01' if index < 3 else None,
+                    xp_reward=0,
+                )
+                for index in range(20)
+            ]
+            db.session.add_all(extra_assignments)
+            db.session.add_all([
+                AssignmentSubmission(
+                    assignment_id=assignment_id,
+                    student_id=student.id,
+                    answer='answer',
+                    score=50,
+                    status=(
+                        'pending_review'
+                        if index == 0
+                        else 'submitted'
+                        if index < 4
+                        else 'checked'
+                        if index < 12
+                        else 'needs_revision'
+                    ),
+                )
+                for index, student in enumerate(students)
+            ])
+            db.session.commit()
+
+        with app.test_client() as client:
+            self.assertEqual(self.login_teacher(client).status_code, 200)
+
+            classes = client.get('/api/teacher/classes?page_size=100').get_json()
+            self.assertEqual(len(classes['classes']), 15)
+            self.assertEqual(classes['pagination'], {'page': 1, 'page_size': 15, 'total': 21, 'total_pages': 2})
+            self.assertEqual(len(client.get('/api/teacher/classes?page=2').get_json()['classes']), 6)
+
+            overview = client.get('/api/teacher/overview?page_size=100').get_json()
+            self.assertEqual(len(overview['classes']), 15)
+            self.assertEqual(overview['classes_pagination']['total'], 21)
+            self.assertEqual(overview['summary']['classes'], 21)
+            self.assertEqual(overview['summary']['students'], 20)
+            self.assertEqual(overview['summary']['assignments'], 21)
+            self.assertEqual(overview['summary']['submissions'], 20)
+
+            detail = client.get(
+                f'/api/teacher/classes/{classroom_id}?students_page=1&assignments_page=1&page_size=100'
+            ).get_json()
+            self.assertEqual(len(detail['students']), 15)
+            self.assertEqual(detail['students_pagination']['total'], 20)
+            self.assertEqual(len(detail['assignments']), 15)
+            self.assertEqual(detail['assignments_pagination']['total'], 21)
+            self.assertEqual(detail['classroom']['students_count'], 20)
+            self.assertEqual(detail['classroom']['assignments_count'], 21)
+            self.assertEqual(detail['assignment_summary']['pending_submissions'], 4)
+            self.assertEqual(detail['assignment_summary']['reviewed_submissions'], 16)
+            self.assertEqual(detail['assignment_summary']['overdue_assignments'], 3)
+            self.assertEqual(detail['practice_heatmap']['summary']['failed'], 8)
+            self.assertEqual(detail['practice_heatmap']['summary']['reviewed'], 16)
+            self.assertEqual(detail['assignments'][0]['id'], assignment_id)
+
+            assignments = client.get(
+                f'/api/teacher/classes/{classroom_id}/assignments?page_size=100'
+            ).get_json()
+            self.assertEqual(len(assignments['assignments']), 15)
+            self.assertEqual(assignments['pagination']['total'], 21)
+            self.assertEqual(assignments['assignments'][0]['id'], assignment_id)
+
+            submissions = client.get(
+                f'/api/teacher/assignments/{assignment_id}/submissions?page_size=100'
+            ).get_json()
+            self.assertEqual(len(submissions['submissions']), 15)
+            self.assertEqual(submissions['pagination']['total'], 20)
+            checked = client.get(
+                f'/api/teacher/assignments/{assignment_id}/submissions?status=checked'
+            ).get_json()
+            self.assertEqual(checked['pagination']['total'], 8)
+            self.assertTrue(all(row['status'] == 'checked' for row in checked['submissions']))
+            pending = client.get(
+                f'/api/teacher/assignments/{assignment_id}/submissions?status=pending'
+            ).get_json()
+            self.assertEqual(pending['pagination']['total'], 4)
+            self.assertTrue(
+                all(row['status'] in {'submitted', 'pending_review'} for row in pending['submissions'])
+            )
+            self.assertEqual(
+                client.get(
+                    f'/api/teacher/assignments/{assignment_id}/submissions?status=unknown'
+                ).status_code,
+                400,
+            )
+
     def test_teacher_read_endpoints_do_not_backfill_submissions(self):
         app = self.create_app()
         teacher_id, classroom_id, assignment_id = self.create_teacher_fixture(app)
@@ -465,19 +597,15 @@ class TeacherReadPathTests(unittest.TestCase):
             catalog_response = client.get(f'/api/teacher/lesson-catalog?classroom_id={classroom_id}')
             self.assertEqual(catalog_response.status_code, 200)
             catalog_payload = catalog_response.get_json()
-            self.assertTrue(any(item['id'] == lesson_id for item in catalog_payload['lessons']))
+            self.assertFalse(any(item['id'] == lesson_id for item in catalog_payload['lessons']))
 
             lesson_response = client.get(f'/api/lessons/{lesson_id}')
-            self.assertEqual(lesson_response.status_code, 200)
-            lesson_payload = lesson_response.get_json()
-            self.assertEqual(len(lesson_payload['lesson']['quizzes']), 1)
-            for question in lesson_payload['lesson']['quizzes'][0]['questions']:
-                self.assertNotIn('correct', question)
-
+            self.assertEqual(lesson_response.status_code, 403)
         with app.app_context():
+            from app.core.db import db
             from app.models.learning import Lesson, Quiz
 
-            lesson = Lesson.query.get(lesson_id)
+            lesson = db.session.get(Lesson, lesson_id)
             self.assertIsNotNone(lesson)
             self.assertEqual(lesson.module.custom_classroom_id, classroom_id)
             self.assertEqual(Quiz.query.count(), 1)

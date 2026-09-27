@@ -7,10 +7,11 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { api, getApiErrorMessage } from '@/lib/api'
+import { FiveItemPager, SERVER_PAGE_SIZE, useFiveItemWindow } from '@/components/five-item-navigator'
 import { showErrorToast, showSuccessToast } from '@/lib/toast'
-import type { UsefulAgeGroup, UsefulDifficulty, UsefulTaskItem } from '@/types'
+import type { PaginationMeta, UsefulAgeGroup, UsefulDifficulty, UsefulTaskItem } from '@/types'
 
-type AdminListResponse = { tasks: UsefulTaskItem[] }
+type AdminListResponse = { tasks: UsefulTaskItem[]; pagination: PaginationMeta }
 type SaveResponse = { task: UsefulTaskItem }
 
 const AGE_GROUP_OPTIONS: UsefulAgeGroup[] = ['junior', 'middle', 'senior']
@@ -47,16 +48,22 @@ export function AdminUsefulTasks() {
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT)
   const [busy, setBusy] = useState(false)
   const [loadErr, setLoadErr] = useState('')
+  const [page, setPage] = useState(1)
+  const [pagination, setPagination] = useState<PaginationMeta | null>(null)
+  const [loading, setLoading] = useState(false)
+  const tasksWindow = useFiveItemWindow({ items, pagination, loading, onPageChange: setPage })
 
   const refresh = useCallback(async () => {
     setLoadErr('')
+    setLoading(true)
     try {
-      const data = await api<AdminListResponse>('/useful/admin', undefined, 'required')
+      const data = await api<AdminListResponse>(`/useful/admin?page=${page}&page_size=${SERVER_PAGE_SIZE}`, undefined, 'required')
       setItems(data.tasks || [])
+      setPagination(data.pagination)
     } catch (e) {
       setLoadErr(getApiErrorMessage(e, 'Не удалось загрузить список.'))
-    }
-  }, [])
+    } finally { setLoading(false) }
+  }, [page])
 
   useEffect(() => {
     void refresh()
@@ -295,9 +302,9 @@ export function AdminUsefulTasks() {
 
       <section className="codequest-card p-5 sm:p-6">
         <p className="brand-eyebrow">Список</p>
-        <h2 className="mt-2 text-lg font-black text-slate-900">Все записи ({items.length})</h2>
+        <h2 className="mt-2 text-lg font-black text-slate-900">Все записи ({pagination?.total ?? items.length})</h2>
         <ul className="mt-4 space-y-2">
-          {items.map(task => (
+          {tasksWindow.visibleItems.map(task => (
             <li
               key={task.id}
               className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between"
@@ -338,6 +345,7 @@ export function AdminUsefulTasks() {
             <li className="text-sm text-slate-500">Пока ничего не создано.</li>
           ) : null}
         </ul>
+        <FiveItemPager window={tasksWindow} loading={loading} itemLabel='заданий' className='mt-4' />
       </section>
     </main>
   )

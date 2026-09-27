@@ -4,6 +4,7 @@ const THEME_KEY = 'codequest_theme'
 export const DEFAULT_THEME: AppTheme = 'light'
 export const THEME_CHANGE_EVENT = 'progyx:theme-change'
 export const THEME_TRANSITION_DURATION_MS = 620
+export const THEME_REDUCED_TRANSITION_DURATION_MS = 200
 const ALL_THEMES: AppTheme[] = ['light', 'dark', 'sky', 'forest', 'sunset', 'lavender', 'sakura', 'mint']
 
 type ThemeTransitionOptions = {
@@ -21,8 +22,12 @@ export function resolveTheme(value: unknown, fallback: AppTheme = DEFAULT_THEME)
 
 export function getStoredTheme(): AppTheme | null {
   if (typeof window === 'undefined') return null
-  const value = window.localStorage.getItem(THEME_KEY)
-  return isAppTheme(value) ? value : null
+  try {
+    const value = window.localStorage.getItem(THEME_KEY)
+    return isAppTheme(value) ? value : null
+  } catch {
+    return null
+  }
 }
 
 export function getDocumentTheme(): AppTheme {
@@ -46,7 +51,11 @@ export function applyTheme(theme: AppTheme = DEFAULT_THEME) {
 
 export function persistTheme(theme: AppTheme) {
   if (typeof window === 'undefined') return
-  window.localStorage.setItem(THEME_KEY, theme)
+  try {
+    window.localStorage.setItem(THEME_KEY, theme)
+  } catch {
+    // Storage can be unavailable; the current page can still change theme.
+  }
 }
 
 export function setTheme(theme: AppTheme, options?: { persist?: boolean }) {
@@ -96,7 +105,25 @@ export function isThemeViewTransitionRunning(): boolean {
   return document.documentElement.dataset.themeTransition === 'running'
 }
 
-export async function setThemeWithTransition(
+let pendingThemeTransition: Promise<void> | null = null
+
+export function setThemeWithTransition(
+  theme: AppTheme,
+  options?: ThemeTransitionOptions,
+): Promise<void> {
+  // A second startViewTransition skips the first one. Queue changes so its
+  // fallback and cleanup cannot overwrite a newer choice or its snapshots.
+  const operation = pendingThemeTransition
+    ? pendingThemeTransition.then(() => runThemeTransition(theme, options))
+    : runThemeTransition(theme, options)
+  const pending = operation.finally(() => {
+    if (pendingThemeTransition === pending) pendingThemeTransition = null
+  })
+  pendingThemeTransition = pending
+  return pending
+}
+
+async function runThemeTransition(
   theme: AppTheme,
   options?: ThemeTransitionOptions,
 ) {
@@ -124,8 +151,7 @@ export async function setThemeWithTransition(
   if (
     !origin ||
     typeof document.startViewTransition !== 'function' ||
-    typeof root.animate !== 'function' ||
-    prefersReducedMotion()
+    typeof root.animate !== 'function'
   ) {
     applyTheme(nextTheme)
     return
@@ -134,10 +160,18 @@ export async function setThemeWithTransition(
   root.dataset.themeTransition = 'running'
   root.dataset.themeTransitionTarget = nextTheme
 
+  let updateDone: Promise<unknown> | undefined
+  let finished: Promise<unknown> | undefined
+  let transition: ViewTransition | undefined
   try {
-    const transition = document.startViewTransition!.call(document, () => {
+    transition = document.startViewTransition!.call(document, () => {
       applyTheme(nextTheme)
     })
+
+    // Skipped transitions can reject multiple promises together. Observe all
+    // of them immediately, including those we have not started awaiting yet.
+    updateDone = transition.updateCallbackDone.catch(() => undefined)
+    finished = transition.finished.catch(() => undefined)
 
     await transition.ready
 
@@ -149,17 +183,24 @@ export async function setThemeWithTransition(
         ],
       },
       {
-        duration: THEME_TRANSITION_DURATION_MS,
+        // Keep explicit theme changes visible even when the OS reduces motion.
+        duration: prefersReducedMotion()
+          ? THEME_REDUCED_TRANSITION_DURATION_MS
+          : THEME_TRANSITION_DURATION_MS,
         easing: 'cubic-bezier(0.76, 0, 0.24, 1)',
         fill: 'both',
         pseudoElement: '::view-transition-new(root)',
       },
     )
 
-    await transition.finished
   } catch {
+    transition?.skipTransition()
+    // A skipped transition still runs its update callback. Let that settle
+    // before applying the fallback or allowing the next queued selection.
+    await updateDone
     applyTheme(nextTheme)
   } finally {
+    await finished
     clearThemeTransitionState(root)
   }
 }

@@ -6,14 +6,15 @@ from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 
 from ..core.db import db
+from ..core.pagination import DEFAULT_PAGE_SIZE, paginate_query, pagination_payload
 from ..models.staff_messaging import StaffDirectMessage, StaffDirectReadState, StaffDirectThread
 from ..models.user import TEACHER_APPROVAL_APPROVED, User, UserRole
 
 MESSAGE_BODY_MAX_LENGTH = 400
 MESSAGE_PREVIEW_MAX_LENGTH = 120
 SUMMARY_THREAD_LIMIT = 300
-SEARCH_RESULTS_LIMIT = 20
-DIRECTORY_USER_LIMIT = 2000
+SEARCH_RESULTS_LIMIT = DEFAULT_PAGE_SIZE
+DIRECTORY_USER_LIMIT = DEFAULT_PAGE_SIZE
 
 _STAFF_ROLES = frozenset({UserRole.ADMIN, UserRole.SUPERADMIN})
 
@@ -181,25 +182,64 @@ def peer_threads_summary_block(current: User) -> dict:
     return {"total_unread": total, "threads": rows}
 
 
-def staff_inbox_summary(current: User) -> dict:
+def staff_inbox_summary(
+    current: User,
+    *,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    teachers_page: int = 1,
+    staff_page: int = 1,
+) -> dict:
     if not is_privileged_messaging_user(current):
-        return {"total_unread": 0, "threads": [], "directory": {"teachers": [], "staff": []}}
+        empty = pagination_payload(0, page, page_size)
+        return {
+            "total_unread": 0,
+            "threads": [],
+            "pagination": empty,
+            "directory": {
+                "teachers": [],
+                "staff": [],
+                "teachers_pagination": pagination_payload(0, teachers_page, page_size),
+                "staff_pagination": pagination_payload(0, staff_page, page_size),
+            },
+        }
+    thread_query = StaffDirectThread.query.filter(
+        or_(
+            StaffDirectThread.user_low_id == current.id,
+            StaffDirectThread.user_high_id == current.id,
+        )
+    ).order_by(StaffDirectThread.updated_at.desc(), StaffDirectThread.id.desc())
+    page_threads, pagination = paginate_query(thread_query, page=page, page_size=page_size)
     rows: list[dict] = []
-    total = 0
-    for thread in _threads_for_user(current):
+    for thread in page_threads:
         other_id = _other_user_id(thread, current.id)
         other = db.session.get(User, other_id)
         if other is None:
             continue
-        u = _unread_count(thread, current.id)
-        total += u
         rows.append(_thread_row_for(thread, current, other=other))
-    directory = _directory_listings(current)
-    return {"total_unread": total, "threads": rows, "directory": directory}
+    total = sum(_unread_count(thread, current.id) for thread in _threads_for_user(current))
+    directory = _directory_listings(
+        current,
+        teachers_page=teachers_page,
+        staff_page=staff_page,
+        page_size=page_size,
+    )
+    return {
+        "total_unread": total,
+        "threads": rows,
+        "pagination": pagination,
+        "directory": directory,
+    }
 
 
-def _directory_listings(current: User) -> dict:
-    teachers = (
+def _directory_listings(
+    current: User,
+    *,
+    teachers_page: int = 1,
+    staff_page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> dict:
+    teachers_query = (
         User.query.filter(
             User.role == UserRole.TEACHER,
             User.is_active.is_(True),
@@ -207,42 +247,55 @@ def _directory_listings(current: User) -> dict:
             User.id != current.id,
         )
         .order_by(User.full_name.asc(), User.email.asc(), User.id.asc())
-        .limit(DIRECTORY_USER_LIMIT)
-        .all()
     )
-    staff = (
+    teachers, teachers_pagination = paginate_query(
+        teachers_query,
+        page=teachers_page,
+        page_size=page_size,
+    )
+    staff_query = (
         User.query.filter(
             User.role.in_((UserRole.ADMIN, UserRole.SUPERADMIN)),
             User.is_active.is_(True),
             User.id != current.id,
         )
         .order_by(User.full_name.asc(), User.email.asc(), User.id.asc())
-        .limit(DIRECTORY_USER_LIMIT)
-        .all()
+    )
+    staff, staff_pagination = paginate_query(
+        staff_query,
+        page=staff_page,
+        page_size=page_size,
     )
     return {
         "teachers": [_user_payload(u) for u in teachers],
         "staff": [_user_payload(u) for u in staff],
+        "teachers_pagination": teachers_pagination,
+        "staff_pagination": staff_pagination,
     }
 
 
-def search_users_by_login(current: User, q: str) -> list[User]:
+def search_users_by_login(
+    current: User,
+    q: str,
+    *,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> tuple[list[User], dict]:
     if not is_privileged_messaging_user(current):
-        return []
+        return [], pagination_payload(0, page, page_size)
     q = (q or "").strip()
     if len(q) < 2:
-        return []
+        return [], pagination_payload(0, page, page_size)
     like = f"%{q}%"
-    return (
+    query = (
         User.query.filter(
             User.is_active.is_(True),
             User.id != current.id,
             User.email.ilike(like),
         )
         .order_by(User.email.asc(), User.id.asc())
-        .limit(SEARCH_RESULTS_LIMIT)
-        .all()
     )
+    return paginate_query(query, page=page, page_size=page_size)
 
 
 def start_thread_with_message_from_staff(

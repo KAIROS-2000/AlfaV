@@ -1,23 +1,19 @@
-function normalize(value: string | undefined) {
-  const trimmed = value?.trim()
-  return trimmed ? trimmed.replace(/\/$/, '') : null
-}
+import { getBuildAppEnvironment } from './runtime-env'
 
 function getAppEnv() {
-  return (normalize(process.env.NEXT_PUBLIC_APP_ENV) || process.env.NODE_ENV || 'development').toLowerCase()
+  return getBuildAppEnvironment()
 }
 
-const configuredPublicApiUrl = normalize(process.env.NEXT_PUBLIC_API_URL)
-
-function requirePublicApiUrl() {
-  if (!configuredPublicApiUrl) {
-    throw new Error('NEXT_PUBLIC_API_URL must be set when NEXT_PUBLIC_APP_ENV=production')
+function getPublicApiPath() {
+  const configured = process.env.NEXT_PUBLIC_API_URL?.trim() || '/api'
+  if (!configured.startsWith('/') || configured.startsWith('//')) {
+    throw new Error(
+      'NEXT_PUBLIC_API_URL must be a same-origin path (normally /api); configure INTERNAL_API_URL for the upstream API',
+    )
   }
-  return configuredPublicApiUrl
+  return configured.replace(/\/$/, '') || '/api'
 }
 
 export const PUBLIC_APP_ENV = getAppEnv()
 export const PUBLIC_IS_PRODUCTION = PUBLIC_APP_ENV === 'production'
-export const PUBLIC_API_URL = PUBLIC_IS_PRODUCTION
-  ? requirePublicApiUrl()
-  : configuredPublicApiUrl || 'http://localhost:3000/api'
+export const PUBLIC_API_URL = getPublicApiPath()

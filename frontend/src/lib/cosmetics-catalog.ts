@@ -9,6 +9,15 @@ export const AVATAR_FILES: Record<string, string> = {
   мужчина3: 'мужчина3.png',
   мужчина4: 'мужчина4.png',
   мужчина5: 'мужчина5.png',
+  'neon-hacker': 'neon-hacker.png',
+  'prism-oracle': 'prism-oracle.png',
+  'cosmic-cube': 'cosmic-cube.png',
+  'neon-bot': 'neon-bot.png',
+  'glitch-phantom': 'glitch-phantom.png',
+  'void-mage': 'void-mage.png',
+  'crystal-king': 'crystal-king.png',
+  'cyber-dragon': 'cyber-dragon.png',
+  'shadow-rogue': 'shadow-rogue.png',
 }
 
 export const FRAME_FILES: Record<string, string> = {

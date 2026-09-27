@@ -2,35 +2,38 @@
   "name": "codequest-frontend",
   "private": true,
   "version": "2.0.0",
+  "type": "module",
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0 --port 3000",
     "build": "next build",
     "start": "next start -H 0.0.0.0 -p 3000",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/lib/route-access.test.ts src/lib/registration-flow.test.ts src/lib/server-response-policy.test.ts src/lib/settled-results.test.ts src/lib/trusted-client-ip.test.ts src/lib/theme.test.ts src/lib/site-config.test.ts"
   },
   "dependencies": {
-    "@gsap/react": "latest",
-    "@monaco-editor/react": "latest",
-    "clsx": "latest",
+    "@gsap/react": "2.1.2",
+    "@monaco-editor/react": "4.7.0",
+    "clsx": "2.1.1",
     "gsap": "3.14.2",
-    "lucide-react": "latest",
-    "next": "^16.2.12",
+    "lucide-react": "1.7.0",
+    "next": "16.2.12",
     "react": "19.2.0",
     "react-dom": "19.2.0",
-    "react-hot-toast": "^2.6.0"
+    "react-hot-toast": "2.6.0"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "latest",
-    "@types/node": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "tailwindcss": "latest",
-    "typescript": "latest"
+    "@tailwindcss/postcss": "4.2.2",
+    "@types/node": "25.5.0",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "tailwindcss": "4.2.2",
+    "typescript": "6.0.2"
   },
   "overrides": {
-    "dompurify": "^3.4.12",
+    "dompurify": "3.4.13",
     "monaco-editor": "0.56.0",
-    "postcss": "^8.5.24",
-    "sharp": "^0.35.3"
+    "nanoid": "3.3.18",
+    "postcss": "8.5.24",
+    "sharp": "0.35.3"
   }
 }

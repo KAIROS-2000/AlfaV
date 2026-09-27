@@ -8,3 +8,11 @@ yarn-error.log*
 pnpm-debug.log*
 .env
 .env.*
+secrets
+.github
+docs
+.vscode
+.idea
+*.log
+*.tsbuildinfo
+coverage

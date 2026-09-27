@@ -1,6 +1,7 @@
 'use client'
 
 import { RolePill } from '@/components/role-pill'
+import { FiveItemPager, SERVER_PAGE_SIZE, useFiveItemWindow } from '@/components/five-item-navigator'
 import { api, getApiErrorMessage } from '@/lib/api'
 import { showErrorToast, showSuccessToast } from '@/lib/toast'
 import type { AdminManagerDirectoryResponse, AdminUserListItem } from '@/types'
@@ -12,12 +13,14 @@ export function SuperadminManagersPanel({ initialData }: { initialData: AdminMan
   const [busy, setBusy] = useState<number | null>(null)
   const [form, setForm] = useState({ full_name: '', email: '', phone: '', password: '' })
   const [creating, setCreating] = useState(false)
+  const [page, setPage] = useState(initialData?.pagination.page ?? 1)
+  const managerWindow = useFiveItemWindow({ items: data?.managers ?? [], pagination: data?.pagination, loading, onPageChange: setPage })
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (nextPage = page) => {
     setLoading(true)
-    try { setData(await api<AdminManagerDirectoryResponse>('/admin/managers?page=1&page_size=50', undefined, 'required')) } catch (error) { showErrorToast(getApiErrorMessage(error, 'Не удалось загрузить менеджеров.')) } finally { setLoading(false) }
-  }, [])
-  useEffect(() => { void load() }, [load])
+    try { setData(await api<AdminManagerDirectoryResponse>(`/admin/managers?page=${nextPage}&page_size=${SERVER_PAGE_SIZE}`, undefined, 'required')) } catch (error) { showErrorToast(getApiErrorMessage(error, 'Не удалось загрузить менеджеров.')) } finally { setLoading(false) }
+  }, [page])
+  useEffect(() => { if (initialData && page === initialData.pagination.page) return; void load(page) }, [initialData, load, page])
 
   async function create(event: React.FormEvent) {
     event.preventDefault(); setCreating(true)
@@ -37,8 +40,9 @@ export function SuperadminManagersPanel({ initialData }: { initialData: AdminMan
     </form>
     <section className='space-y-4'><div className='codequest-card p-5 sm:p-6'><p className='brand-eyebrow'>Команда</p><div className='mt-2 flex flex-wrap items-center justify-between gap-3'><h2 className='text-2xl font-black text-slate-900'>Менеджеры</h2><span className='brand-chip brand-chip--soft'>{data?.pagination.total ?? 0} всего</span></div></div>
       {loading && !data ? <div className='codequest-card p-6 text-slate-500'>Загрузка…</div> : null}
-      {data?.managers.map(user => <article key={user.id} className='codequest-card flex flex-col gap-4 p-5 transition-transform duration-200 hover:-translate-y-0.5 sm:flex-row sm:items-center sm:justify-between sm:p-6'><div className='min-w-0'><div className='flex flex-wrap items-center gap-2'><h3 className='font-black text-slate-900'>{user.full_name}</h3><RolePill role='manager' /></div><p className='mt-1 break-all text-sm text-slate-500'>{user.email}{user.phone ? ` · ${user.phone}` : ''}</p></div><div className='flex flex-wrap gap-2'><button type='button' disabled={busy === user.id} onClick={() => void change(user, user.is_active ? 'block' : 'unblock')} className='rounded-full bg-amber-100 px-4 py-2 text-sm font-semibold text-amber-800 disabled:opacity-50'>{user.is_active ? 'Блокировать' : 'Разблокировать'}</button><button type='button' disabled={busy === user.id} onClick={() => void change(user, 'delete')} className='rounded-full bg-rose-100 px-4 py-2 text-sm font-semibold text-rose-800 disabled:opacity-50'>Удалить</button></div></article>)}
+      {managerWindow.visibleItems.map(user => <article key={user.id} className='codequest-card flex flex-col gap-4 p-5 transition-transform duration-200 hover:-translate-y-0.5 sm:flex-row sm:items-center sm:justify-between sm:p-6'><div className='min-w-0'><div className='flex flex-wrap items-center gap-2'><h3 className='font-black text-slate-900'>{user.full_name}</h3><RolePill role='manager' /></div><p className='mt-1 break-all text-sm text-slate-500'>{user.email}{user.phone ? ` · ${user.phone}` : ''}</p></div><div className='flex flex-wrap gap-2'><button type='button' disabled={busy === user.id} onClick={() => void change(user, user.is_active ? 'block' : 'unblock')} className='rounded-full bg-amber-100 px-4 py-2 text-sm font-semibold text-amber-800 disabled:opacity-50'>{user.is_active ? 'Блокировать' : 'Разблокировать'}</button><button type='button' disabled={busy === user.id} onClick={() => void change(user, 'delete')} className='rounded-full bg-rose-100 px-4 py-2 text-sm font-semibold text-rose-800 disabled:opacity-50'>Удалить</button></div></article>)}
       {!loading && data?.managers.length === 0 ? <div className='codequest-card p-8 text-center text-slate-500'>Менеджеры пока не созданы.</div> : null}
+      <FiveItemPager window={managerWindow} loading={loading} itemLabel='менеджеров' />
     </section>
   </div>
 }

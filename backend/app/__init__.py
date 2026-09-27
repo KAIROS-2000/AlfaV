@@ -1,9 +1,14 @@
+# ruff: noqa: E402
+
 import sys
 import threading
 import time
 import os
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 from urllib.parse import urlparse
 
 import redis
@@ -11,8 +16,10 @@ import redis
 from flask import Flask, abort, g, has_request_context, request, send_from_directory
 from flask.testing import FlaskClient
 from flask_cors import CORS
-from sqlalchemy import event
+from sqlalchemy import event, text
+from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.datastructures import Headers
+from werkzeug.exceptions import NotFound, RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -142,6 +149,74 @@ def _validate_postgres_password(app: Flask) -> None:
         )
 
 
+def _validate_email_address(name: str, value: str) -> None:
+    local_part, separator, domain = value.strip().partition("@")
+    if (
+        not separator
+        or not local_part
+        or not domain
+        or "@" in domain
+        or any(char.isspace() for char in value)
+    ):
+        raise RuntimeError(f"{name} must be a valid email address when SEND_MAIL=true in production.")
+
+
+def _validate_https_url(name: str, value: str) -> None:
+    parsed = urlparse(value)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or bool(parsed.fragment)
+    ):
+        raise RuntimeError(f"{name} must be an absolute HTTPS URL when SEND_MAIL=true in production.")
+
+
+def _validate_https_origin(name: str, value: str) -> None:
+    if "," in value:
+        raise RuntimeError(f"{name} must contain exactly one HTTPS origin in production mode.")
+    parsed = urlparse(value)
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must contain a valid HTTPS origin in production mode.") from exc
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or bool(parsed.path)
+        or bool(parsed.params)
+        or bool(parsed.query)
+        or bool(parsed.fragment)
+    ):
+        raise RuntimeError(f"{name} must be an absolute HTTPS origin without a path in production mode.")
+
+
+def _validate_production_email_config(app: Flask) -> None:
+    if not app.config["IS_PRODUCTION"] or not app.config.get("SEND_MAIL"):
+        return
+    if app.config.get("EMAIL_DRY_RUN"):
+        raise RuntimeError("EMAIL_DRY_RUN must be disabled when SEND_MAIL=true in production.")
+    provider = str(app.config.get("EMAIL_PROVIDER") or "").strip().lower()
+    if provider != "unisender_go":
+        raise RuntimeError("EMAIL_PROVIDER must be 'unisender_go' when SEND_MAIL=true in production.")
+    api_key = str(app.config.get("UNISENDER_GO_API_KEY") or "").strip()
+    if not api_key or _contains_placeholder_secret_fragment(api_key):
+        raise RuntimeError("Set a non-placeholder UNISENDER_GO_API_KEY when SEND_MAIL=true in production.")
+    _validate_https_url(
+        "UNISENDER_GO_API_URL",
+        str(app.config.get("UNISENDER_GO_API_URL") or "").strip(),
+    )
+    _validate_email_address("EMAIL_FROM", str(app.config.get("EMAIL_FROM") or ""))
+    reply_to = str(app.config.get("EMAIL_REPLY_TO") or "").strip()
+    if reply_to:
+        _validate_email_address("EMAIL_REPLY_TO", reply_to)
+    frontend_url = str(app.config.get("FRONTEND_PUBLIC_URL") or "").strip()
+    _validate_https_origin("FRONTEND_PUBLIC_URL", frontend_url)
+
+
 class _CSRFAwareFlaskClient(FlaskClient):
     def open(self, *args, **kwargs):  # noqa: ANN002, ANN003
         method = str(kwargs.get("method") or "").upper()
@@ -202,16 +277,44 @@ def _validate_runtime_config(app: Flask) -> None:
         raise RuntimeError("SESSION_COOKIE_SECURE must stay enabled in production mode.")
     if app.config["IS_PRODUCTION"] and str(app.config.get("SESSION_COOKIE_SAMESITE") or "").lower() != "strict":
         raise RuntimeError("SESSION_COOKIE_SAMESITE must be Strict in production mode.")
-    if app.config["IS_PRODUCTION"] and not app.config.get("GIGACHAT_VERIFY_SSL", True):
-        raise RuntimeError("GIGACHAT_VERIFY_SSL cannot be disabled in production mode.")
-    if app.config["IS_PRODUCTION"] and not (app.config.get("CLIENT_URL") or "").strip():
-        raise RuntimeError("Set CLIENT_URL in production mode.")
+    if app.config["IS_PRODUCTION"]:
+        client_url = str(app.config.get("CLIENT_URL") or "").strip()
+        if not client_url:
+            raise RuntimeError("Set CLIENT_URL in production mode.")
+        _validate_https_origin("CLIENT_URL", client_url)
+    legal_documents_version = str(app.config.get("LEGAL_DOCUMENTS_VERSION") or "").strip()
+    if app.config["IS_PRODUCTION"] and (
+        not legal_documents_version
+        or len(legal_documents_version) > 64
+        or legal_documents_version.lower() in {
+            "dev",
+            "development",
+            "development-v1",
+            "latest",
+            "current",
+            "unset",
+        }
+        or _contains_placeholder_secret_fragment(legal_documents_version)
+    ):
+        raise RuntimeError(
+            "Set a non-placeholder LEGAL_DOCUMENTS_VERSION before running in production mode."
+        )
+    max_content_length = app.config.get("MAX_CONTENT_LENGTH")
+    if (
+        not isinstance(max_content_length, int)
+        or isinstance(max_content_length, bool)
+        or max_content_length <= 0
+        or max_content_length > 64 * 1024 * 1024
+    ):
+        raise RuntimeError("MAX_CONTENT_LENGTH must be an integer between 1 and 67108864 bytes.")
+    _validate_production_email_config(app)
     if app.config["IS_PRODUCTION"] and (app.config.get("CODE_JUDGE_RUNNER_URL") or "").strip():
         runner_token = (app.config.get("CODE_JUDGE_RUNNER_TOKEN") or "").strip()
         runner_token_lower = runner_token.lower()
         if (
-            runner_token_lower in {"", "local-dev-judge-token-change-me", "replace-with-random-judge-runner-token"}
+            not runner_token_lower
             or len(runner_token) < 32
+            or any(marker in runner_token_lower for marker in ("replace", "change-me", "example", "placeholder", "local-dev", "test-token"))
         ):
             raise RuntimeError("Set a strong CODE_JUDGE_RUNNER_TOKEN before enabling the code judge runner in production.")
     if app.config["IS_PRODUCTION"] and app.config.get("SUPERADMIN_BOOTSTRAP"):
@@ -246,6 +349,91 @@ def _validate_runtime_config(app: Flask) -> None:
         ok, redis_err = _redis_production_config_ok(redis_url, redis_password)
         if not ok:
             raise RuntimeError(redis_err or "Invalid REDIS_URL for production mode.")
+
+
+def _database_ready() -> bool:
+    try:
+        with db.engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return True
+    except (OSError, RuntimeError, SQLAlchemyError):
+        return False
+
+
+def _redis_ready(app: Flask) -> tuple[bool | None, bool]:
+    redis_url = str(app.config.get("REDIS_URL") or "").strip()
+    redis_required = bool(app.config.get("READINESS_REQUIRE_REDIS"))
+    redis_checked = redis_required or bool(redis_url)
+    if not redis_checked:
+        return None, False
+    if not redis_url:
+        return False, True
+    from .core.redis_client import redis_ping_with_timeout_ms
+
+    return bool(redis_ping_with_timeout_ms()), True
+
+
+def _probe_judge_health(runner_url: str, timeout_ms: int) -> bool:
+    parsed = urlparse(runner_url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return False
+    health_url = parsed._replace(path="/health", params="", query="", fragment="").geturl()
+    health_request = urllib_request.Request(
+        health_url,
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    timeout_seconds = max(min(int(timeout_ms), 5000), 100) / 1000.0
+    try:
+        with urllib_request.urlopen(health_request, timeout=timeout_seconds) as response:
+            if int(getattr(response, "status", 0) or 0) != 200:
+                return False
+            payload = json.loads(response.read().decode("utf-8"))
+    except (
+        json.JSONDecodeError,
+        OSError,
+        TimeoutError,
+        UnicodeError,
+        urllib_error.HTTPError,
+        urllib_error.URLError,
+    ):
+        return False
+    return isinstance(payload, dict) and payload.get("status") == "ok"
+
+
+def _judge_ready(app: Flask) -> tuple[bool | None, bool]:
+    runner_url = str(app.config.get("CODE_JUDGE_RUNNER_URL") or "").strip()
+    judge_required = bool(app.config.get("READINESS_REQUIRE_JUDGE"))
+    judge_checked = judge_required or bool(runner_url)
+    if not judge_checked:
+        return None, False
+    if not runner_url:
+        return False, True
+    timeout_ms = int(app.config.get("READINESS_JUDGE_TIMEOUT_MS") or 500)
+    return _probe_judge_health(runner_url, timeout_ms), True
+
+
+def _readiness_payload(app: Flask, *, legacy_health: bool = False) -> tuple[dict, int]:
+    database_ok = _database_ready()
+    redis_ok, redis_checked = _redis_ready(app)
+    judge_ok, judge_checked = _judge_ready(app)
+    ready = (
+        database_ok
+        and (not redis_checked or redis_ok is True)
+        and (not judge_checked or judge_ok is True)
+    )
+    checks = {"database": database_ok, "redis": redis_ok, "judge": judge_ok}
+    payload = {
+        "status": "ok" if ready and legacy_health else ("ready" if ready else "not_ready"),
+        "checks": checks,
+        # Keep the historic top-level fields useful for existing monitors.
+        "database": database_ok,
+    }
+    if redis_checked:
+        payload["redis"] = redis_ok
+    if judge_checked:
+        payload["judge"] = judge_ok
+    return payload, 200 if ready else 503
 
 
 _MAINT_FLAG_LOCK = threading.Lock()
@@ -355,21 +543,34 @@ def create_app() -> Flask:
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
     app.register_blueprint(useful_bp, url_prefix="/api/useful")
 
+    @app.errorhandler(RequestEntityTooLarge)
+    def request_entity_too_large(_error: RequestEntityTooLarge):
+        return {
+            "message": "Request body exceeds the configured size limit.",
+            "code": "request_too_large",
+            "max_bytes": app.config["MAX_CONTENT_LENGTH"],
+        }, 413
+
+    @app.get("/api/live")
+    def liveness():
+        return {"status": "ok"}
+
+    @app.get("/api/ready")
+    def readiness():
+        return _readiness_payload(app)
+
     @app.get("/api/health")
     def health():
-        payload = {"status": "ok"}
-        if (app.config.get("REDIS_URL") or "").strip():
-            from .core.redis_client import redis_ping_with_timeout_ms
-
-            payload["redis"] = bool(redis_ping_with_timeout_ms())
-        return payload
+        # Backward-compatible path used by existing deployments. Unlike the old
+        # implementation, it now reports dependency failure via a non-2xx status.
+        return _readiness_payload(app, legacy_health=True)
 
     @app.before_request
     def enforce_maintenance_mode():
         if request.method in SAFE_HTTP_METHODS:
             return None
         path = request.path or ""
-        if path.startswith("/api/health"):
+        if path.startswith(("/api/health", "/api/live", "/api/ready")):
             return None
         if not _maintenance_flag_active(app):
             return None
@@ -426,12 +627,18 @@ def create_app() -> Flask:
     @app.get("/api/media/avatars/<path:filename>")
     def media_avatar(filename: str):
         _ensure_allowed_media_extension(filename)
-        return send_from_directory(MEDIA_DIR / "avatars", filename)
+        try:
+            return send_from_directory(MEDIA_DIR / "avatars", filename)
+        except NotFound:
+            return send_from_directory(PROJECT_ROOT / "media" / "avatars", filename)
 
     @app.get("/api/media/frames/<path:filename>")
     def media_frame(filename: str):
         _ensure_allowed_media_extension(filename)
-        return send_from_directory(MEDIA_DIR / "frames", filename)
+        try:
+            return send_from_directory(MEDIA_DIR / "frames", filename)
+        except NotFound:
+            return send_from_directory(PROJECT_ROOT / "media" / "frames", filename)
 
     # Assignment cover images allow .svg in addition to raster formats: SVG placeholders
     # are generated server-side (no user input substituted into <text>), and our global

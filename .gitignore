@@ -1,9 +1,16 @@
 # --- Secrets / local env ---
 secrets/redis_password
 secrets/postgres_password
+secrets/judge_runner_token
+secrets/restic_password
+secrets/backup_access_key_id
+secrets/backup_secret_access_key
+.prod-smoke-secrets/
+.prod-smoke.env
 .env
 .env.*
 !.env.example
+!.env.production.example
 frontend/.env
 frontend/.env.*
 backend/.env

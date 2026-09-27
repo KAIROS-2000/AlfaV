@@ -3,12 +3,12 @@ import { serverApi } from '@/lib/server-api'
 import type { UserItem } from '@/types'
 
 export default async function SupportPage() {
-	const session = await serverApi<{ user: UserItem }>('/auth/me').catch(() => null)
+	const session = await serverApi<{ user: UserItem }>('/auth/me')
 
 	return (
 		<main className='brand-app-shell'>
 			<div className='page-shell mx-auto w-full max-w-[96rem]'>
-				<SupportRequestPage initialUser={session?.user ?? null} />
+				<SupportRequestPage initialUser={session.user} />
 			</div>
 		</main>
 	)

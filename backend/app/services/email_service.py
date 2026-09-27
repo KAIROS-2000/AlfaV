@@ -205,42 +205,39 @@ def render_verification_email(user: User, raw_token: str) -> tuple[str, str, str
     return subject, html, text
 
 
-def render_parent_welcome_email(user: User, raw_password: str, raw_token: str) -> tuple[str, str, str]:
-    """Single email that gives the parent both the initial password and the verify link.
+def render_parent_welcome_email(user: User, raw_token: str) -> tuple[str, str, str]:
+    """Render the one-time parent password-setup email.
 
-    Parent flow is "enter email -> get into cabinet immediately, password arrives by mail".
-    We never store the raw password anywhere except the email body — DB has only the hash.
+    The message contains no generated password. Following the link proves
+    control of the inbox and lets the parent choose their own password.
     """
 
-    if not raw_password:
-        raise EmailConfigurationError('Initial password must not be empty.')
-    ttl_minutes = int(current_app.config.get('EMAIL_VERIFICATION_TOKEN_TTL_MINUTES') or 1440)
+    if not raw_token:
+        raise EmailConfigurationError('Password setup token must not be empty.')
+    ttl_minutes = int(current_app.config.get('PARENT_PASSWORD_SETUP_TOKEN_TTL_MINUTES') or 1440)
     ttl_hours = max(ttl_minutes // 60, 1)
     full_name = (user.full_name or '').strip() or 'родитель'
     platform = _platform_name()
     content_html = (
         f"<div style=\"margin:22px 0 0;padding:16px;border-radius:14px;background:#f9fafb;border:1px solid #e5e7eb;\">"
         f"<p style=\"margin:0 0 8px;font-weight:700;\">Логин: <span style=\"color:#111827;\">{_escape(user.email)}</span></p>"
-        f"<p style=\"margin:0;font-weight:700;\">Временный пароль: "
-        f"<code style=\"display:inline-block;padding:4px 9px;border-radius:8px;background:#111827;color:#ffffff;font-size:15px;letter-spacing:0.03em;\">{_escape(raw_password)}</code></p>"
+        f"<p style=\"margin:0;color:#374151;\">Задайте пароль по одноразовой ссылке ниже.</p>"
         f"</div>"
-        f"<p style=\"margin:18px 0 0;color:#374151;\">Сейчас вы уже вошли в кабинет в браузере. Сохраните пароль — он понадобится для входа с другого устройства.</p>"
     )
     content_text = (
         f"\n\nЛогин: {user.email}\n"
-        f"Временный пароль: {raw_password}\n\n"
-        "Сейчас вы уже вошли в кабинет в браузере. Сохраните пароль — он понадобится для входа с другого устройства."
+        "Задайте пароль по одноразовой ссылке ниже."
     )
     html, text = _render_minimal_card(
-        heading='Семейный кабинет создан',
-        intro=f"Здравствуйте, {full_name}! Мы создали для вас семейный кабинет в {platform}.",
-        action_label='Подтвердить email',
-        action_url=_verification_url(raw_token),
+        heading='Завершите создание семейного кабинета',
+        intro=f"Здравствуйте, {full_name}! Завершите регистрацию семейного кабинета в {platform}.",
+        action_label='Задать пароль',
+        action_url=_reset_url(raw_token),
         content_html=content_html,
         content_text=content_text,
         footer_note=(
-            f"Ссылка подтверждения действует {ttl_hours} ч. Рекомендуем сразу сменить временный пароль "
-            "в настройках профиля. Если вы не регистрировались на платформе, проигнорируйте это письмо."
+            f"Ссылка действует {ttl_hours} ч и работает только один раз. "
+            "Если вы не регистрировались на платформе, проигнорируйте это письмо."
         ),
     )
     subject = f"Доступ к семейному кабинету в {platform}"
@@ -717,10 +714,10 @@ def send_notification_email(
     )
 
 
-def send_parent_welcome_email(user: User, raw_password: str, raw_token: str) -> EmailDeliveryResult:
+def send_parent_welcome_email(user: User, raw_token: str) -> EmailDeliveryResult:
     if not raw_token:
-        raise EmailConfigurationError('Verification token must not be empty.')
-    subject, html, text = render_parent_welcome_email(user, raw_password, raw_token)
+        raise EmailConfigurationError('Password setup token must not be empty.')
+    subject, html, text = render_parent_welcome_email(user, raw_token)
     return send_email(
         user.email,
         subject,

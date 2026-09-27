@@ -19,6 +19,7 @@ VALID_ASSIGNMENT_TYPES = {"lesson_practice", "mini_project", "quiz", "reflection
 VALID_SUBMISSION_FORMATS = {"text", "code", "link", "mixed"}
 VALID_TASK_EVALUATION_MODES = {"manual", "keywords", "stdin_stdout"}
 VALID_CODE_LANGUAGES = {"python", "javascript"}
+MAX_AUTHORING_DRAFT_PAYLOAD_BYTES = 64 * 1024
 ASSIGNMENT_TYPE_LABELS = {
     "lesson_practice": "Практика по уроку",
     "mini_project": "Мини-проект",
@@ -153,6 +154,42 @@ def _safe_int(
     return parsed
 
 
+def _safe_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return default
+
+
+def _normalized_draft_payload(value) -> dict | None:
+    """Return a bounded JSON object suitable for author-only draft recovery."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return None
+    if len(encoded.encode("utf-8")) > MAX_AUTHORING_DRAFT_PAYLOAD_BYTES:
+        return None
+    return json.loads(encoded)
+
+
+def normalize_authoring_metadata(value: dict | None) -> dict:
+    """Keep only staff-only authoring metadata with bounded JSON draft state."""
+    raw = value if isinstance(value, dict) else {}
+    format_note = str(raw.get("format_note") or "").strip()
+    payload: dict = {"format_note": format_note} if format_note else {}
+    draft_payload = _normalized_draft_payload(raw.get("draft_payload"))
+    if draft_payload is not None:
+        payload["draft_payload"] = draft_payload
+    return payload
+
+
 def _string_list(value) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -189,6 +226,7 @@ def _test_case_list(value) -> list[dict]:
                 "label": label,
                 "input": test_input,
                 "expected": expected,
+                "is_public": _safe_bool(item.get("is_public")),
             }
         )
     return rows
@@ -263,6 +301,7 @@ def normalize_task_validation(
         keywords = []
     runner = "stdin_stdout" if evaluation_mode == "stdin_stdout" else None
     language = normalize_code_language(raw.get("language"), default=default_language)
+    is_keyword_task = evaluation_mode == "keywords"
     return {
         "evaluation_mode": evaluation_mode,
         "runner": runner,
@@ -273,6 +312,21 @@ def normalize_task_validation(
         ),
         "keywords": keywords,
         "tests": tests,
+        "require_all_keywords": (
+            _safe_bool(raw.get("require_all_keywords"))
+            if is_keyword_task
+            else False
+        ),
+        "minimum_answer_length": (
+            _safe_int(
+                raw.get("minimum_answer_length"),
+                0,
+                minimum=0,
+                maximum=5000,
+            )
+            if is_keyword_task
+            else 0
+        ),
         "time_limit_ms": _safe_int(
             raw.get("time_limit_ms"), 2000, minimum=500, maximum=10000
         ),
@@ -300,6 +354,8 @@ def public_task_validation(
         "runner": normalized["runner"],
         "language": normalized["language"],
         "keywords": normalized["keywords"],
+        "require_all_keywords": normalized["require_all_keywords"],
+        "minimum_answer_length": normalized["minimum_answer_length"],
         "tests_count": len(normalized["tests"]),
         "time_limit_ms": (
             normalized["time_limit_ms"]
@@ -451,6 +507,27 @@ class Lesson(db.Model):
     duration_minutes = db.Column(db.Integer, nullable=False, default=10)
     passing_score = db.Column(db.Integer, nullable=False, default=70)
     is_published = db.Column(db.Boolean, nullable=False, default=True)
+    created_by_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+    version = db.Column(db.Integer, nullable=False, default=1)
+    published_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    archived_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    authoring_metadata = db.Column(JSONType, nullable=False, default=dict)
+
+    # Authoring handlers update ``version`` explicitly.  SQLAlchemy then emits
+    # ``WHERE version = <loaded version>`` so concurrent saves cannot silently
+    # overwrite each other.
+    __mapper_args__ = {
+        "version_id_col": version,
+        "version_id_generator": False,
+    }
 
     module = db.relationship("Module", back_populates="lessons")
     tasks = db.relationship(
@@ -463,6 +540,12 @@ class Lesson(db.Model):
         "UserProgress", back_populates="lesson", cascade="all, delete-orphan"
     )
 
+    @property
+    def status(self) -> str:
+        if self.archived_at is not None:
+            return "archived"
+        return "published" if self.is_published else "draft"
+
     def to_summary_dict(self) -> dict:
         return {
             "id": self.id,
@@ -472,9 +555,30 @@ class Lesson(db.Model):
             "duration_minutes": self.duration_minutes,
             "passing_score": self.passing_score,
             "order_index": self.order_index,
+            "is_published": self.is_published,
+            "status": self.status,
             "module_title": self.module.title,
             "is_custom": self.module.is_custom_classroom_module,
             "custom_classroom_id": self.module.custom_classroom_id,
+        }
+
+    def to_authoring_summary_dict(self) -> dict:
+        """Serialize only the metadata needed to browse an author's lessons.
+
+        Full authoring payloads can include hidden test cases and quiz answers, so
+        collection endpoints should use this deliberately small representation.
+        """
+        return {
+            **self.to_summary_dict(),
+            "module_id": self.module_id,
+            "module_slug": self.module.slug,
+            "module_age_group": self.module.age_group,
+            "module_is_published": self.module.is_published,
+            "created_by_id": self.created_by_id,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "published_at": self.published_at.isoformat() if self.published_at else None,
+            "archived_at": self.archived_at.isoformat() if self.archived_at else None,
+            "version": self.version,
         }
 
     def to_dict(self, include_private: bool = False) -> dict:
@@ -484,10 +588,24 @@ class Lesson(db.Model):
             "content_format": self.content_format,
             "theory_blocks": self.theory_blocks,
             "interactive_steps": self.interactive_steps,
-            "tasks": [task.to_dict() for task in self.tasks],
+            "tasks": [task.to_dict(include_private=include_private) for task in self.tasks],
             "quizzes": [
                 quiz.to_dict(include_private=include_private) for quiz in self.quizzes
             ],
+        }
+
+    def to_authoring_dict(self) -> dict:
+        metadata = normalize_authoring_metadata(self.authoring_metadata)
+        return {
+            **self.to_dict(include_private=True),
+            "authoring_metadata": metadata,
+            "format_note": metadata.get("format_note", ""),
+            "draft_payload": metadata.get("draft_payload"),
+            "created_by_id": self.created_by_id,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "published_at": self.published_at.isoformat() if self.published_at else None,
+            "archived_at": self.archived_at.isoformat() if self.archived_at else None,
+            "version": self.version,
         }
 
 
@@ -534,7 +652,7 @@ class Task(db.Model):
             == "manual"
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self, include_private: bool = False) -> dict:
         age_group = self.lesson.module.age_group if self.lesson else None
         effective_task_type = normalize_task_type(self.task_type, age_group=age_group)
         return {
@@ -543,7 +661,7 @@ class Task(db.Model):
             "title": self.title,
             "prompt": self.prompt,
             "starter_code": self.starter_code if effective_task_type == "code" else "",
-            "validation": self.normalized_validation(),
+            "validation": self.normalized_validation(include_private=include_private),
             "hints": self.hints,
             "xp_reward": self.xp_reward,
         }
@@ -585,6 +703,122 @@ class Quiz(db.Model):
             "questions": questions,
             "xp_reward": self.xp_reward,
         }
+
+
+def lesson_publish_readiness_errors(lesson: Lesson) -> list[str]:
+    """Describe why a draft cannot become visible to learners yet.
+
+    The check belongs at the publication boundary: drafts intentionally allow
+    incomplete authoring data, while student-visible lessons must be coherent.
+    """
+    errors: list[str] = []
+    metadata = normalize_authoring_metadata(lesson.authoring_metadata)
+    if metadata.get("draft_payload") is not None:
+        errors.append("Сначала завершите и сохраните черновик урока.")
+
+    if not str(lesson.title or "").strip():
+        errors.append("Добавьте название урока.")
+    if not str(lesson.summary or "").strip():
+        errors.append("Добавьте краткое описание урока.")
+
+    theory_blocks = lesson.theory_blocks if isinstance(lesson.theory_blocks, list) else []
+    theory_text = next(
+        (
+            str(block.get("text") or "").strip()
+            for block in theory_blocks
+            if isinstance(block, dict) and block.get("type") == "text"
+        ),
+        "",
+    )
+    key_points = next(
+        (
+            _string_list(block.get("items"))
+            for block in theory_blocks
+            if isinstance(block, dict) and block.get("type") == "list"
+        ),
+        [],
+    )
+    if not theory_text:
+        errors.append("Добавьте объяснение темы.")
+    if len(key_points) < 2:
+        errors.append("Добавьте минимум две ключевые идеи.")
+
+    interactive_steps = lesson.interactive_steps if isinstance(lesson.interactive_steps, list) else []
+    complete_steps = [
+        item
+        for item in interactive_steps
+        if (
+            str(item.get("text") or "").strip()
+            if isinstance(item, dict)
+            else str(item or "").strip()
+        )
+    ]
+    if len(complete_steps) < 2:
+        errors.append("Добавьте минимум два шага маршрута урока.")
+
+    draft_payload = metadata.get("draft_payload")
+    if isinstance(draft_payload, dict) and draft_payload.get("practice_enabled") is True and not lesson.tasks:
+        errors.append("Завершите практическое задание или отключите его.")
+    draft_quiz = draft_payload.get("quiz") if isinstance(draft_payload, dict) else None
+    if isinstance(draft_quiz, dict) and draft_quiz.get("enabled") is True and not lesson.quizzes:
+        errors.append("Завершите итоговый квиз или отключите его.")
+
+    for task in lesson.tasks:
+        if not str(task.title or "").strip() or not str(task.prompt or "").strip():
+            errors.append("Заполните название и формулировку практики.")
+            continue
+        validation = task.normalized_validation(include_private=True)
+        task_type = normalize_task_type(
+            task.task_type,
+            age_group=lesson.module.age_group if lesson.module else None,
+        )
+        if task_type == "code" and not validation["tests"]:
+            errors.append("Добавьте автотесты для кодовой практики.")
+        elif validation["evaluation_mode"] == "keywords" and not validation["keywords"]:
+            errors.append("Добавьте ключевые слова для автопроверки.")
+        elif validation["evaluation_mode"] == "stdin_stdout" and not validation["tests"]:
+            errors.append("Добавьте автотесты для практики.")
+
+    for quiz in lesson.quizzes:
+        questions = quiz.questions if isinstance(quiz.questions, list) else []
+        if not str(quiz.title or "").strip() or not questions:
+            errors.append("Добавьте корректный вопрос в итоговый квиз.")
+
+    return errors
+
+
+def clone_lesson_content(source: Lesson, target: Lesson) -> None:
+    """Copy the complete authoring payload into a new draft lesson."""
+    target.content_format = source.content_format
+    target.theory_blocks = json.loads(json.dumps(source.theory_blocks or []))
+    target.interactive_steps = json.loads(json.dumps(source.interactive_steps or []))
+    target.duration_minutes = source.duration_minutes
+    target.passing_score = source.passing_score
+    target.authoring_metadata = normalize_authoring_metadata(source.authoring_metadata)
+
+    for source_task in source.tasks:
+        target.tasks.append(
+            Task(
+                task_type=source_task.task_type,
+                title=source_task.title,
+                prompt=source_task.prompt,
+                starter_code=source_task.starter_code,
+                validation=json.loads(
+                    json.dumps(source_task.normalized_validation(include_private=True))
+                ),
+                hints=json.loads(json.dumps(source_task.hints or [])),
+                xp_reward=source_task.xp_reward,
+            )
+        )
+    for source_quiz in source.quizzes:
+        target.quizzes.append(
+            Quiz(
+                title=source_quiz.title,
+                passing_score=source_quiz.passing_score,
+                questions=json.loads(json.dumps(source_quiz.questions or [])),
+                xp_reward=source_quiz.xp_reward,
+            )
+        )
 
 
 class Classroom(db.Model):
@@ -895,5 +1129,3 @@ class UserAchievement(db.Model):
 
     user = db.relationship("User", back_populates="achievements")
     achievement = db.relationship("Achievement", back_populates="users")
-
-

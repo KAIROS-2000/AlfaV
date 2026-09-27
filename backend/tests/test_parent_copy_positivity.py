@@ -170,13 +170,14 @@ class ParentInsightsCopyPositivityTests(unittest.TestCase):
         student_id = self._make_student_with_needs_revision_lesson(app)
 
         with app.app_context():
+            from app.core.db import db
             from app.models.user import User
             from app.services.parent_insights import (
                 activity_trend_text,
                 weekly_digest_narrative,
             )
 
-            student = User.query.get(student_id)
+            student = db.session.get(User, student_id)
             assert_clean_parent_text(
                 self,
                 weekly_digest_narrative(student, allowed_module_slugs=None),

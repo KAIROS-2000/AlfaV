@@ -5,8 +5,8 @@ import type { AdminAuditLogResponse } from '@/types'
 
 export default async function SuperadminLogsPage() {
   const logs = await serverApi<AdminAuditLogResponse>(
-    '/admin/audit-logs?page=1&page_size=20',
-  ).catch(() => null)
+    '/admin/audit-logs?page=1&page_size=15',
+  )
 
   return (
     <AdminAreaShell area="superadmin" section="logs">

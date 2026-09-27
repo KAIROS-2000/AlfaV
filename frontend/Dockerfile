@@ -1,60 +1,43 @@
-# ---------------------------------------------------------------------------
-# Image pinning REQUIRED for production.
-# Replace each FROM node:22-alpine line below with a digest-pinned form, e.g.:
-#   FROM node:22-alpine@sha256:<digest> AS deps
-# All three stages MUST use the same digest. See
-# docs/operations/image-pinning.md and scripts/pin-images.sh.
-# ---------------------------------------------------------------------------
-
-FROM node:22-alpine AS deps
-# pin: node:22-alpine  (replace with @sha256:<digest> before prod build)
-
+# syntax=docker/dockerfile:1.7
+# Keep this digest in sync across every stage. Update with scripts/pin-images.sh.
+FROM node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS deps
 WORKDIR /app
-
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
 
-FROM node:22-alpine AS builder
-# pin: node:22-alpine  (MUST match the deps stage digest)
-
+FROM node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS builder
 WORKDIR /app
-
-ARG APP_ENV=production
-ARG NEXT_PUBLIC_APP_ENV=production
-ARG NEXT_PUBLIC_API_URL
-ARG INTERNAL_API_URL
-
-ENV APP_ENV=$APP_ENV
-ENV NEXT_PUBLIC_APP_ENV=$NEXT_PUBLIC_APP_ENV
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
-ENV INTERNAL_API_URL=$INTERNAL_API_URL
-
+ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
-# CACHEBUST: change build-arg to force a fresh Next.js compile after header/nav edits.
-ARG CACHEBUST=1
-RUN echo "frontend build cache bust: ${CACHEBUST}"
 COPY . .
-RUN npm run build
+RUN --mount=type=cache,target=/app/.next/cache \
+    npm run build
 
-FROM node:22-alpine AS runner
-# pin: node:22-alpine  (MUST match the deps/builder stage digest)
-
+FROM node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS runner
 WORKDIR /app
-
 ENV NODE_ENV=production \
-    NEXT_TELEMETRY_DISABLED=1
-
-RUN addgroup -S app && adduser -S app -G app
-
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
-
-COPY --from=builder --chown=app:app /app/.next ./.next
+    APP_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    HOSTNAME=0.0.0.0 \
+    PORT=3000
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+        /usr/local/lib/node_modules \
+        /usr/local/bin/corepack \
+        /usr/local/bin/npm \
+        /usr/local/bin/npx \
+        /usr/local/bin/pnpm \
+        /usr/local/bin/pnpx \
+        /usr/local/bin/yarn \
+        /usr/local/bin/yarnpkg \
+        /opt/yarn-v1.22.22 \
+    && groupadd --system --gid 1001 app \
+    && useradd --system --uid 1001 --gid app app
+COPY --from=builder --chown=app:app /app/.next/standalone ./
+COPY --from=builder --chown=app:app /app/.next/static ./.next/static
 COPY --from=builder --chown=app:app /app/public ./public
-COPY --from=builder --chown=app:app /app/next.config.ts ./next.config.ts
-
+RUN mkdir -p /app/.next/cache/images && chown -R app:app /app/.next
 USER app
-
-RUN mkdir -p /app/.next/cache/images
-
-CMD ["npm", "run", "start"]
+CMD ["node", "server.js"]

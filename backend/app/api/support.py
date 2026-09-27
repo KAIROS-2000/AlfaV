@@ -3,6 +3,7 @@ from __future__ import annotations
 from flask import Blueprint, request
 
 from ..core.db import db
+from ..core.pagination import pagination_params
 from ..core.security import auth_required
 from ..models.user import User, UserRole
 from ..services import notifications
@@ -63,7 +64,8 @@ def create_ticket(user: User):
 @support_bp.get("/tickets")
 @auth_required(_TICKET_CREATORS)
 def list_my_tickets(user: User):
-    return svc.user_inbox_summary(user)
+    page, page_size = pagination_params(request.args)
+    return svc.user_inbox_summary(user, page=page, page_size=page_size)
 
 
 @support_bp.get("/tickets/<int:ticket_id>")
@@ -138,9 +140,15 @@ def post_ticket_read(user: User, ticket_id: int):
 @auth_required(_STAFF)
 def staff_list(user: User):
     status_filter = str(request.args.get("status") or "all")
-    rows = svc.staff_ticket_rows(user, status_filter=status_filter)
+    page, page_size = pagination_params(request.args)
+    rows, pagination = svc.staff_ticket_rows(
+        user,
+        status_filter=status_filter,
+        page=page,
+        page_size=page_size,
+    )
     total_unread = svc.staff_inbox_summary(user)["total_unread"]
-    return {"total_unread": total_unread, "tickets": rows}
+    return {"total_unread": total_unread, "tickets": rows, "pagination": pagination}
 
 
 @support_bp.get("/staff/tickets/<int:ticket_id>")
@@ -248,7 +256,8 @@ def create_bug_report(user: User):
 @support_bp.get("/bug-reports/me")
 @auth_required(_BUG_HUNTER_REPORTERS)
 def list_my_bug_reports(user: User):
-    return bug_svc.list_my_reports(user)
+    page, page_size = pagination_params(request.args)
+    return bug_svc.list_my_reports(user, page=page, page_size=page_size)
 
 
 @support_bp.get("/staff/bug-reports")
@@ -256,11 +265,16 @@ def list_my_bug_reports(user: User):
 def staff_list_bug_reports(_user: User):
     st_raw = request.args.get("status")
     status_filter = None if not st_raw or str(st_raw).strip() == '' else str(st_raw).strip()
-    limit = _safe_limit(request.args.get("limit"), default=80, maximum=200)
-    rows = bug_svc.staff_list_rows(status=status_filter, limit=limit)
+    page, page_size = pagination_params(request.args)
+    rows, pagination = bug_svc.staff_list_rows(
+        status=status_filter,
+        page=page,
+        page_size=page_size,
+    )
     return {
         "reports": [r.to_dict(include_private=True) for r in rows],
         "xp_reward_on_approval": bug_svc.get_bug_hunter_approved_xp(),
+        "pagination": pagination,
     }
 
 

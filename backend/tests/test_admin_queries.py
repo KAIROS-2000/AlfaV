@@ -125,7 +125,7 @@ class AdminLessonCreationTests(unittest.TestCase):
     def login_admin(self, client):
         return client.post('/api/auth/login', json={'login': 'admin@example.com', 'password': 'AdminPass123!'})
 
-    def test_admin_can_insert_lesson_and_publish_module(self):
+    def test_admin_can_insert_draft_lesson_without_publishing_module(self):
         app = self.create_app()
         module_id = self.create_admin_fixture(app)
 
@@ -151,22 +151,24 @@ class AdminLessonCreationTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 201)
             payload = response.get_json()
-            self.assertTrue(payload['roadmap_visible'])
-            self.assertTrue(payload['module']['is_published'])
+            self.assertFalse(payload['roadmap_visible'])
+            self.assertFalse(payload['module']['is_published'])
+            self.assertFalse(payload['lesson']['is_published'])
             self.assertEqual(
                 [item['title'] for item in payload['module']['lessons']],
                 ['Первый урок', 'Новый урок между существующими', 'Второй урок'],
             )
 
         with app.app_context():
+            from app.core.db import db
             from app.models.learning import Lesson, Module
 
-            module = Module.query.get(module_id)
+            module = db.session.get(Module, module_id)
             ordered_titles = [
                 lesson.title
                 for lesson in Lesson.query.filter_by(module_id=module_id).order_by(Lesson.order_index.asc()).all()
             ]
-            self.assertTrue(module.is_published)
+            self.assertFalse(module.is_published)
             self.assertEqual(ordered_titles, ['Первый урок', 'Новый урок между существующими', 'Второй урок'])
 
     def test_admin_quiz_questions_are_normalized(self):

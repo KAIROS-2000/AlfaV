@@ -4,13 +4,14 @@
 
 | Attribute          | Value                                                     |
 | ------------------ | --------------------------------------------------------- |
-| Database           | Postgres 17 (service `db` in `docker-compose.yml`)        |
+| Database           | Postgres 17 (service `db` in `compose.yml`)        |
 | Backup tool        | `pg_dump --format=custom` (see `scripts/backup.sh`)       |
 | Scheduler          | Sidecar service `db-backup` running a sleep-loop          |
 | Cadence            | Every 24h from container start (configurable)             |
 | On-disk format     | `progyx-<UTC timestamp>.sql.custom.gz`                    |
 | Checksum sidecar   | `progyx-<UTC timestamp>.sql.custom.gz.sha256`             |
-| Location           | Named volume `postgres_backups` mounted at `/backups`     |
+| Local location     | Named volume `postgres_backups` mounted at `/backups`     |
+| Off-host copy      | Encrypted Restic service `offsite-backup`                 |
 | Retention          | `BACKUP_RETENTION_DAYS` (default 14). Newest kept always. |
 | Restore tool       | `scripts/restore.sh` (wraps `pg_restore --clean --if-exists`) |
 
@@ -22,7 +23,7 @@ exactly. It runs as a simple `sh` loop:
 
 ```sh
 while true; do
-    /usr/local/bin/backup.sh || echo "backup failed"
+          sh /usr/local/bin/backup.sh || echo "backup failed"
     sleep ${BACKUP_INTERVAL_SECONDS:-86400}
 done
 ```
@@ -44,7 +45,7 @@ the RPO (24 h) exactly. If sub-daily RPO is ever required, switch to
 ## Configuration
 
 Environment variables (set on the `db-backup` service in
-`docker-compose.yml`):
+`compose.yml`):
 
 | Var                         | Default    | Meaning                                |
 | --------------------------- | ---------- | -------------------------------------- |
@@ -61,12 +62,15 @@ Environment variables (set on the `db-backup` service in
 - **Disk usage.** The named volume `postgres_backups` is local to the host
   and shares its disk budget with the Postgres data volume. Alerting on
   `>80%` used is recommended.
-- **Off-host copies.** Local backups do not survive a host loss. Operators
-  MUST additionally sync the `postgres_backups` volume to an off-host store
-  (e.g. `rclone`, `aws s3 sync`, a minio target). This is out of scope for
-  the compose file; document your sync in the team runbook.
+- **Off-host copies.** `compose.prod.yml` starts `offsite-backup`, which sends
+  the Postgres dumps, media volume and audit volume to an encrypted Restic
+  repository. `RESTIC_REPOSITORY` and the external secret-file paths are
+  mandatory production inputs. Local backups alone do not survive host loss.
+- **Repository initialization.** `RESTIC_AUTO_INIT=true` is permitted only
+  during the first controlled initialization. It must remain `false` during
+  normal operation so a storage outage cannot silently create an empty
+  replacement repository.
 - **Weekly verification.** See `docs/operations/dr.md` for the test-restore
   procedure. A backup that has never been restored is not a backup.
-- **Secrets.** `PGPASSWORD` is currently inlined for parity with the rest
-  of the development stack. In production, wire it through Docker secrets
-  or the orchestrator's secret store.
+- **Secrets.** The scheduler reads `PGPASSWORD_FILE` from a Docker secret at
+  startup. Passwords are neither logged nor passed as build arguments.

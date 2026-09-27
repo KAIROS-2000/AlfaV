@@ -4,21 +4,13 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { Mail, MapPin, Phone } from 'lucide-react'
 import { useSessionUser } from '@/lib/auth-session'
-
-/** Временные заглушки для юридических и контактных данных — замените на реальные. */
-export const SITE_LEGAL_STUBS = {
-	supportEmail: 'support@progyx.example',
-	phone: '+7 (000) 000-00-00',
-	phoneTel: '+70000000000',
-	ipName: 'ИП Иванов Иван Иванович',
-	inn: '000000000000',
-	ogrnip: '000000000000000',
-	legalAddress: 'г. Москва, ул. Примерная, д. 1, офис 1 (заглушка)',
-} as const
+import type { PublicSiteConfig } from '@/lib/site-config'
 
 export function SiteFooter({
+	config,
 	showRegisterLink = true,
 }: {
+	config: PublicSiteConfig
 	showRegisterLink?: boolean
 }) {
 	const pathname = usePathname()
@@ -41,9 +33,9 @@ export function SiteFooter({
 	]
 
 	const docLinks = [
-		{ href: '#', label: 'Политика конфиденциальности (заглушка)' },
-		{ href: '#', label: 'Пользовательское соглашение (заглушка)' },
-		{ href: '#', label: 'Обработка персональных данных (заглушка)' },
+		{ href: '/privacy', label: 'Политика конфиденциальности' },
+		{ href: '/terms', label: 'Пользовательское соглашение' },
+		{ href: '/personal-data', label: 'Обработка персональных данных' },
 	]
 
 	return (
@@ -74,32 +66,32 @@ export function SiteFooter({
 
 					<div className='site-footer__column'>
 						<p className='site-footer__column-title'>Контакты</p>
-						<ul className='site-footer__contact-list'>
-							<li>
+						{config.configured ? <ul className='site-footer__contact-list'>
+							{config.supportEmail ? <li>
 								<a
 									className='site-footer__contact-line'
-									href={`mailto:${SITE_LEGAL_STUBS.supportEmail}`}
+									href={`mailto:${config.supportEmail}`}
 								>
 									<Mail className='site-footer__contact-icon' aria-hidden />
-									<span>{SITE_LEGAL_STUBS.supportEmail}</span>
+									<span>{config.supportEmail}</span>
 								</a>
-							</li>
-							<li>
+							</li> : null}
+							{config.supportPhone && config.supportPhoneHref ? <li>
 								<a
 									className='site-footer__contact-line'
-									href={`tel:${SITE_LEGAL_STUBS.phoneTel}`}
+									href={config.supportPhoneHref}
 								>
 									<Phone className='site-footer__contact-icon' aria-hidden />
-									<span>{SITE_LEGAL_STUBS.phone}</span>
+									<span>{config.supportPhone}</span>
 								</a>
-							</li>
-							<li>
+							</li> : null}
+							{config.legalAddress ? <li>
 								<span className='site-footer__contact-line site-footer__contact-line--static'>
 									<MapPin className='site-footer__contact-icon' aria-hidden />
-									<span>{SITE_LEGAL_STUBS.legalAddress}</span>
+									<span>{config.legalAddress}</span>
 								</span>
-							</li>
-						</ul>
+							</li> : null}
+						</ul> : <p className='site-footer__note'>Контактные данные не настроены для этой среды.</p>}
 					</div>
 
 					<div className='site-footer__column'>
@@ -114,30 +106,27 @@ export function SiteFooter({
 					</div>
 				</div>
 
-				<div className='site-footer__legal-block' role='region' aria-label='Реквизиты организации'>
-					<p className='site-footer__legal-title'>Сведения об индивидуальном предпринимателе (заглушка)</p>
+				{config.configured ? <div className='site-footer__legal-block' role='region' aria-label='Реквизиты организации'>
+					<p className='site-footer__legal-title'>Сведения об операторе</p>
 					<dl className='site-footer__legal-dl'>
 						<div>
 							<dt>Наименование</dt>
-							<dd>{SITE_LEGAL_STUBS.ipName}</dd>
+							<dd>{config.legalName}</dd>
 						</div>
 						<div>
 							<dt>ИНН</dt>
-							<dd>{SITE_LEGAL_STUBS.inn}</dd>
+							<dd>{config.taxId}</dd>
 						</div>
 						<div>
-							<dt>ОГРНИП</dt>
-							<dd>{SITE_LEGAL_STUBS.ogrnip}</dd>
+							<dt>Регистрационный номер</dt>
+							<dd>{config.registrationNumber}</dd>
 						</div>
 						<div>
 							<dt>Юридический адрес</dt>
-							<dd>{SITE_LEGAL_STUBS.legalAddress}</dd>
+							<dd>{config.legalAddress}</dd>
 						</div>
 					</dl>
-					<p className='site-footer__legal-note'>
-						Данные указаны для примера и будут заменены актуальными реквизитами перед публикацией.
-					</p>
-				</div>
+				</div> : null}
 
 				<div className='site-footer__bottom'>
 					<p className='site-footer__copyright'>

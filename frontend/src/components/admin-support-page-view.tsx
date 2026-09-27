@@ -1,12 +1,13 @@
 'use client'
 
 import { AdminAreaShell } from '@/components/admin-area-shell'
+import { FiveItemPager, SERVER_PAGE_SIZE, useFiveItemWindow } from '@/components/five-item-navigator'
 import { RolePill } from '@/components/role-pill'
 import { SupportTicketChatPanel } from '@/components/support-ticket-chat-panel'
 import { UserLocalTime } from '@/components/user-local-time'
 import { api, getApiErrorMessage } from '@/lib/api'
 import { showErrorToast } from '@/lib/toast'
-import type { SupportStaffTicketRow } from '@/types'
+import type { PaginationMeta, SupportStaffTicketRow } from '@/types'
 import { Headphones, Loader2 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 
@@ -48,24 +49,28 @@ export function AdminSupportPageView({
 	const [loading, setLoading] = useState(true)
 	const [error, setError] = useState('')
 	const [activeId, setActiveId] = useState<number | null>(null)
+	const [page, setPage] = useState(1)
+	const [pagination, setPagination] = useState<PaginationMeta | null>(null)
+	const ticketsWindow = useFiveItemWindow({ items: rows, pagination, loading, onPageChange: setPage, resetKey: filter })
 
 	const load = useCallback(async () => {
 		setError('')
 		try {
-			const res = await api<{ tickets: SupportStaffTicketRow[]; total_unread: number }>(
-				`/support/staff/tickets?status=${encodeURIComponent(filter)}`,
+			const res = await api<{ tickets: SupportStaffTicketRow[]; total_unread: number; pagination: PaginationMeta }>(
+				`/support/staff/tickets?status=${encodeURIComponent(filter)}&page=${page}&page_size=${SERVER_PAGE_SIZE}`,
 				undefined,
 				'required',
 			)
 			setRows(Array.isArray(res.tickets) ? res.tickets : [])
 			setTotalUnread(res.total_unread ?? 0)
+			setPagination(res.pagination)
 		} catch (e) {
 			setError(getApiErrorMessage(e, 'Не удалось загрузить обращения.'))
 			showErrorToast(getApiErrorMessage(e, 'Не удалось загрузить обращения.'))
 		} finally {
 			setLoading(false)
 		}
-	}, [filter])
+	}, [filter, page])
 
 	useEffect(() => {
 		void load()
@@ -98,6 +103,7 @@ export function AdminSupportPageView({
 							type='button'
 							onClick={() => {
 								setFilter(f.value)
+								setPage(1)
 								setLoading(true)
 							}}
 							className={`rounded-full px-3 py-1.5 text-xs font-black uppercase tracking-wide ring-1 ring-inset transition ${
@@ -127,7 +133,7 @@ export function AdminSupportPageView({
 						</div>
 					) : rows.length ? (
 						<ul className='space-y-2'>
-							{rows.map(row => {
+							{ticketsWindow.visibleItems.map(row => {
 								const active = activeId === row.ticket_id
 								return (
 									<li key={row.ticket_id}>
@@ -183,6 +189,7 @@ export function AdminSupportPageView({
 					) : (
 						<p className='text-sm text-slate-500'>Нет обращений в этом фильтре.</p>
 					)}
+					<FiveItemPager window={ticketsWindow} loading={loading} itemLabel='обращений' className='mt-4' />
 				</aside>
 
 				<div className='admin-messages__chat-col min-h-0 min-w-0'>

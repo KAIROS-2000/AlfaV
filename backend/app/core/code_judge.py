@@ -102,15 +102,51 @@ def _judge_keywords_submission(task: Task, code: str, validation: dict) -> dict:
     if not keywords:
         raise CodeJudgeConfigurationError('Для текстовой автопроверки не заданы ключевые слова.')
 
-    normalized_answer = (code or '').lower()
+    normalized_answer = ' '.join((code or '').lower().split())
     matches = [keyword for keyword in keywords if keyword in normalized_answer]
     missing = [keyword for keyword in keywords if keyword not in matches]
-    score = 100 if matches and len(matches) == len(keywords) else int((len(matches) / max(len(keywords), 1)) * 100)
-    passed = score >= task.lesson.passing_score
+    keyword_score = (
+        100
+        if matches and len(matches) == len(keywords)
+        else int((len(matches) / max(len(keywords), 1)) * 100)
+    )
+    minimum_answer_length = int(validation.get('minimum_answer_length') or 0)
+    answer_length = len(normalized_answer)
+    length_score = (
+        100
+        if minimum_answer_length <= 0
+        else min(100, int((answer_length / minimum_answer_length) * 100))
+    )
+    require_all_keywords = bool(validation.get('require_all_keywords'))
+    keyword_requirement_met = (
+        len(matches) == len(keywords)
+        if require_all_keywords
+        else keyword_score >= task.lesson.passing_score
+    )
+    length_requirement_met = answer_length >= minimum_answer_length
+    score = min(keyword_score, length_score)
+    passed = keyword_requirement_met and length_requirement_met
     if passed:
-        feedback = f'Автопроверка по ключевым словам пройдена: найдено {len(matches)} из {len(keywords)} ориентиров.'
+        feedback = (
+            'Автопроверка пройдена: ответ достаточно развёрнутый и содержит '
+            f'все нужные ориентиры ({len(matches)} из {len(keywords)}).'
+            if require_all_keywords
+            else (
+                'Автопроверка по ключевым словам пройдена: найдено '
+                f'{len(matches)} из {len(keywords)} ориентиров.'
+            )
+        )
     else:
-        feedback = f'Пока найдено {len(matches)} из {len(keywords)} ориентиров. Попробуй уточнить ответ.'
+        feedback_parts = []
+        if not keyword_requirement_met:
+            feedback_parts.append(
+                f'Найдено {len(matches)} из {len(keywords)} ориентиров.'
+            )
+        if not length_requirement_met:
+            feedback_parts.append(
+                f'В ответе {answer_length} символов, нужно не меньше {minimum_answer_length}.'
+            )
+        feedback = ' '.join(feedback_parts) or 'Попробуй уточнить ответ.'
     return {
         'mode': 'keywords',
         'runner': None,
@@ -125,6 +161,9 @@ def _judge_keywords_submission(task: Task, code: str, validation: dict) -> dict:
         'runtime_error': None,
         'keyword_matches': matches,
         'missing_keywords': missing,
+        'require_all_keywords': require_all_keywords,
+        'answer_length': answer_length,
+        'minimum_answer_length': minimum_answer_length,
         'time_limit_ms': None,
         'memory_limit_mb': None,
     }

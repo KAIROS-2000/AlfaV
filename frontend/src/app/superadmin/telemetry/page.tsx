@@ -4,7 +4,7 @@ import { serverApi } from '@/lib/server-api'
 import type { AdminTelemetryData } from '@/types'
 
 export default async function SuperadminTelemetryPage() {
-  const telemetry = await serverApi<AdminTelemetryData>('/admin/telemetry').catch(() => null)
+  const telemetry = await serverApi<AdminTelemetryData>('/admin/telemetry')
 
   return (
     <AdminAreaShell area="superadmin" section="telemetry">

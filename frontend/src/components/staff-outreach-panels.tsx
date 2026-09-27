@@ -1,6 +1,7 @@
 'use client'
 
 import { AdminAreaShell } from '@/components/admin-area-shell'
+import { FiveItemPager, SERVER_PAGE_SIZE, useFiveItemWindow } from '@/components/five-item-navigator'
 import { RolePill } from '@/components/role-pill'
 import { api, getApiErrorMessage } from '@/lib/api'
 import { showErrorToast, showSuccessToast } from '@/lib/toast'
@@ -37,10 +38,17 @@ export function ContactsPanel({ area, initial }: { area: StaffArea; initial: Con
   const [verified, setVerified] = useState('all')
   const [parentLink, setParentLink] = useState(initial?.filters.parent_link ?? 'all')
   const [page, setPage] = useState(1)
+  const contactsWindow = useFiveItemWindow({
+    items: data?.contacts ?? [],
+    pagination: data?.pagination,
+    loading,
+    onPageChange: setPage,
+    resetKey: `${q}|${status}|${role}|${verified}|${parentLink}`,
+  })
 
   const load = useCallback(async () => {
     setLoading(true)
-    const params = new URLSearchParams({ page: String(page), page_size: '20', status, q })
+    const params = new URLSearchParams({ page: String(page), page_size: String(SERVER_PAGE_SIZE), status, q })
     if (role !== 'all') params.set('roles', role)
     if (verified !== 'all') params.set('verified', verified)
     if (parentLink !== 'all') params.set('parent_link', parentLink)
@@ -84,9 +92,9 @@ export function ContactsPanel({ area, initial }: { area: StaffArea; initial: Con
 
       <section className='space-y-3'>
         {loading && !data ? <div className='codequest-card flex items-center gap-2 p-6 text-slate-600'><Loader2 className='animate-spin' size={18} />Загрузка контактов…</div> : null}
-        {data?.contacts.map(contact => <ContactCard key={contact.id} contact={contact} />)}
+        {contactsWindow.visibleItems.map(contact => <ContactCard key={contact.id} contact={contact} />)}
         {!loading && data?.contacts.length === 0 ? <div className='codequest-card p-8 text-center text-slate-500'>По выбранным фильтрам контактов нет.</div> : null}
-        {data?.pagination.total_pages && data.pagination.total_pages > 1 ? <div className='flex items-center justify-between gap-3 py-2 text-sm'><button className='rounded-full border border-slate-200 px-4 py-2 disabled:opacity-50' disabled={loading || page <= 1} onClick={() => setPage(value => value - 1)}>Назад</button><span>Страница {data.pagination.page} из {data.pagination.total_pages}</span><button className='rounded-full border border-slate-200 px-4 py-2 disabled:opacity-50' disabled={loading || page >= data.pagination.total_pages} onClick={() => setPage(value => value + 1)}>Вперёд</button></div> : null}
+        <FiveItemPager window={contactsWindow} loading={loading} itemLabel='контактов' />
       </section>
     </AdminAreaShell>
   )

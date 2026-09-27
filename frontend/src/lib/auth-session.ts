@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { ApiError, api, clearSessionSilently } from '@/lib/api'
+import { ApiError, api } from '@/lib/api'
 import { getStoredTheme } from '@/lib/theme'
 import {
   getSessionSnapshot,
@@ -12,7 +12,7 @@ import {
 import type { AuthMode } from '@/lib/api'
 import type { UserItem } from '@/types'
 
-let sessionRequest: Promise<UserItem | null> | null = null
+let sessionRequest: Promise<UserItem> | null = null
 
 function canReuseSnapshot(snapshot: SessionSnapshot, auth: AuthMode) {
   if (snapshot.status === 'authenticated') {
@@ -34,33 +34,30 @@ export async function fetchSessionUser({
     return snapshot.user
   }
 
-  if (sessionRequest) {
-    return sessionRequest
+  if (!sessionRequest) {
+    // Keep the shared in-flight request independent from the first caller's
+    // optional/required policy. Each caller handles an authoritative 401 below.
+    sessionRequest = api<{ user: UserItem }>('/auth/me', undefined, { auth: 'required' })
+      .then((result) => {
+        const u = result.user
+        const stored = getStoredTheme()
+        const theme = stored ?? u.theme
+        setAuthenticatedSession({ ...u, theme })
+        return { ...u, theme }
+      })
+      .finally(() => {
+        sessionRequest = null
+      })
   }
 
-  sessionRequest = api<{ user: UserItem }>('/auth/me', undefined, { auth })
-    .then((result) => {
-      const u = result.user
-      const stored = getStoredTheme()
-      const theme = stored ?? u.theme
-      setAuthenticatedSession({ ...u, theme })
-      return { ...u, theme }
-    })
-    .catch((error) => {
-      if (error instanceof ApiError && error.status === 401) {
-        void clearSessionSilently()
-        if (auth === 'optional') {
-          return null
-        }
-      }
-
-      throw error
-    })
-    .finally(() => {
-      sessionRequest = null
-    })
-
-  return sessionRequest
+  try {
+    return await sessionRequest
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401 && auth === 'optional') {
+      return null
+    }
+    throw error
+  }
 }
 
 export function useSessionUser({
@@ -74,10 +71,14 @@ export function useSessionUser({
     status: 'unknown',
     user: null,
   })
+  const [error, setError] = useState<Error | null>(null)
 
   useEffect(() => {
     setSnapshot(getSessionSnapshot())
-    return subscribeSessionSnapshot(setSnapshot)
+    return subscribeSessionSnapshot((nextSnapshot) => {
+      setError(null)
+      setSnapshot(nextSnapshot)
+    })
   }, [])
 
   useEffect(() => {
@@ -90,11 +91,13 @@ export function useSessionUser({
     fetchSessionUser({ auth })
       .then(() => {
         if (!cancelled) {
+          setError(null)
           setSnapshot(getSessionSnapshot())
         }
       })
-      .catch(() => {
+      .catch((sessionError: unknown) => {
         if (!cancelled) {
+          setError(sessionError instanceof Error ? sessionError : new Error('Session request failed'))
           setSnapshot(getSessionSnapshot())
         }
       })
@@ -108,11 +111,17 @@ export function useSessionUser({
     user: snapshot.user,
     status: snapshot.status,
     isAuthenticated: snapshot.status === 'authenticated',
-    isResolved: snapshot.status !== 'unknown',
-    refresh: () =>
-      fetchSessionUser({ auth, force: true }).then((user) => {
+    isResolved: snapshot.status !== 'unknown' || error !== null,
+    error,
+    refresh: () => {
+      setError(null)
+      return fetchSessionUser({ auth, force: true }).then((user) => {
         setSnapshot(getSessionSnapshot())
         return user
-      }),
+      }).catch((sessionError: unknown) => {
+        setError(sessionError instanceof Error ? sessionError : new Error('Session request failed'))
+        throw sessionError
+      })
+    },
   }
 }

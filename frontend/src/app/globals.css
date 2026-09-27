@@ -214,17 +214,18 @@ html {
 	text-size-adjust: 100%;
 }
 
-::view-transition-old(root),
-::view-transition-new(root) {
+html[data-theme-transition='running']::view-transition-group(root),
+html[data-theme-transition='running']::view-transition-old(root),
+html[data-theme-transition='running']::view-transition-new(root) {
 	animation: none;
 	mix-blend-mode: normal;
 }
 
-::view-transition-old(root) {
+html[data-theme-transition='running']::view-transition-old(root) {
 	z-index: 1;
 }
 
-::view-transition-new(root) {
+html[data-theme-transition='running']::view-transition-new(root) {
 	z-index: 2;
 }
 
@@ -271,8 +272,12 @@ body {
 		color 240ms ease;
 }
 
-html[data-theme-transition='running'] body {
-	transition: none;
+/* Capture the final palette, including descendants with transition-colors. */
+html[data-theme-transition='running'],
+html[data-theme-transition='running'] *,
+html[data-theme-transition='running'] *::before,
+html[data-theme-transition='running'] *::after {
+	transition: none !important;
 }
 
 ::selection {
@@ -606,7 +611,8 @@ html[data-theme='dark'] [class*='text-sky-50/'] {
 }
 
 html[data-theme='dark'] [class~='bg-sky-50'],
-html[data-theme='dark'] [class~='bg-sky-100'] {
+html[data-theme='dark'] [class~='bg-sky-100'],
+html[data-theme='dark'] [class*='bg-sky-50/'] {
 	background-color: var(--accent-muted) !important;
 }
 
@@ -4071,6 +4077,11 @@ html[data-theme='dark'] .tournament-jury span {
 	.messaging-panel__message,
 	.messaging-unread-badge {
 		animation: none;
+	}
+
+	.messaging-panel__message {
+		opacity: 1;
+		transform: none;
 	}
 }
 
@@ -8884,6 +8895,10 @@ html[data-theme='dark'] .it-career-market__ticker span {
 	pointer-events: none;
 }
 
+.user-avatar-frame {
+	z-index: 2;
+}
+
 .shop-frame-img {
 	width: 132%;
 	height: 132%;
@@ -8914,8 +8929,8 @@ html[data-theme='dark'] .it-career-market__ticker span {
 }
 
 .user-avatar-frame[data-frame='корона'] {
-	top: -42%;
-	left: 30%;
+	top: -35%;
+	left: 5%;
 	width: 105%;
 	height: 105%;
 	transform: none;

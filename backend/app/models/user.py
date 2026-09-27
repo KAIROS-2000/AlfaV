@@ -64,6 +64,8 @@ class User(db.Model):
     email_verified = db.Column(db.Boolean, nullable=False, default=True, server_default='1')
     email_verified_at = db.Column(db.DateTime(timezone=True), nullable=True)
     password_changed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    legal_documents_version = db.Column(db.String(64), nullable=True)
+    legal_documents_accepted_at = db.Column(db.DateTime(timezone=True), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
 
     classes_created = db.relationship('Classroom', back_populates='teacher', foreign_keys='Classroom.teacher_id')
@@ -130,6 +132,10 @@ class User(db.Model):
             if self.teacher_rejection_expires_at
             else None,
             'email_verified': bool(self.email_verified),
+            'legal_documents_version': self.legal_documents_version,
+            'legal_documents_accepted_at': self.legal_documents_accepted_at.isoformat()
+            if self.legal_documents_accepted_at
+            else None,
         }
 
     def to_parent_dict(self) -> dict:
@@ -254,9 +260,11 @@ class SecurityThrottle(db.Model):
 
 EMAIL_TOKEN_PURPOSE_VERIFICATION = 'email_verification'
 EMAIL_TOKEN_PURPOSE_PASSWORD_RESET = 'password_reset'
+EMAIL_TOKEN_PURPOSE_PARENT_PASSWORD_SETUP = 'parent_password_setup'
 EMAIL_TOKEN_PURPOSES = {
     EMAIL_TOKEN_PURPOSE_VERIFICATION,
     EMAIL_TOKEN_PURPOSE_PASSWORD_RESET,
+    EMAIL_TOKEN_PURPOSE_PARENT_PASSWORD_SETUP,
 }
 
 

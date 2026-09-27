@@ -4,6 +4,6 @@ import { serverApi } from '@/lib/server-api'
 import type { AdminManagerDirectoryResponse } from '@/types'
 
 export default async function SuperadminManagersPage() {
-  const initial = await serverApi<AdminManagerDirectoryResponse>('/admin/managers?page=1&page_size=50').catch(() => null)
+  const initial = await serverApi<AdminManagerDirectoryResponse>('/admin/managers?page=1&page_size=15')
   return <AdminAreaShell area='superadmin' section='managers'><SuperadminManagersPanel initialData={initial} /></AdminAreaShell>
 }

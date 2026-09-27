@@ -21,7 +21,7 @@ If a tighter RPO is needed (e.g. 1 hour), move to continuous WAL archiving
 - Docker + docker compose installed.
 - Read access to a copy of the target backup file
   (`progyx-YYYYMMDDTHHMMSSZ.sql.custom.gz`) and its `.sha256` sidecar.
-- The same `postgres:17` image digest used in production (see
+- The same hardened `POSTGRES_IMAGE` digest used in production (see
   `docs/operations/image-pinning.md`).
 
 ## Full restore procedure
@@ -70,14 +70,13 @@ SQL
 ### 5. Restore
 
 ```sh
-docker compose exec \
+docker compose -f compose.yml -f compose.prod.yml exec \
     -e RESTORE_ASSUME_YES=1 \
     -e PGHOST=db \
     -e PGDATABASE=codequest \
     -e PGUSER=codequest \
-    -e PGPASSWORD=codequest \
     db-backup \
-    /usr/local/bin/restore.sh /backups/progyx-YYYYMMDDTHHMMSSZ.sql.custom.gz
+    sh /usr/local/bin/restore.sh /backups/progyx-YYYYMMDDTHHMMSSZ.sql.custom.gz
 ```
 
 Watch for `restore complete` in the output. Any `pg_restore` error line
@@ -100,7 +99,7 @@ docker compose start backend frontend
 
 ### 8. Post-restore verification
 
-- `/api/health` returns `200`.
+- `/api/live` and `/api/ready` return `200`.
 - Log in as a known administrator account and spot-check dashboards.
 - Record the dump file name, checksum, and restore duration in the
   incident log.
@@ -125,10 +124,10 @@ A failure at any step is a P1 — escalate via the contact chain below.
 
 | Role                 | Contact                                                    |
 | -------------------- | ---------------------------------------------------------- |
-| Primary on-call      | *fill in from team runbook*                                |
-| Secondary on-call    | *fill in*                                                  |
-| DBA / platform owner | *fill in*                                                  |
-| Incident commander   | *fill in*                                                  |
+| Primary on-call      | Required in the private deployment runbook before release |
+| Secondary on-call    | Required in the private deployment runbook before release |
+| DBA / platform owner | Required in the private deployment runbook before release |
+| Incident commander   | Required in the private deployment runbook before release |
 
 ## Dependencies & monitoring
 
@@ -149,6 +148,6 @@ A failure at any step is a P1 — escalate via the contact chain below.
   writes normally, but replica / analytics consumers may see lock waits on
   specific large tables. A future move to `pg_basebackup` + WAL archiving
   removes this.
-- The current compose file stores the backup volume on the same host as
-  the primary data volume. A host loss loses both. Off-host sync is
-  mandatory for any real deployment (see `backup.md`).
+- The local backup volume remains on the database host. Production also runs
+  the encrypted `offsite-backup` Restic service; monitor both local freshness
+  and off-host snapshot freshness (see `backup.md`).

@@ -1,0 +1,287 @@
+name: progyx
+
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-backend-env: &backend-env
+  APP_ENV: ${APP_ENV:-production}
+  MEDIA_DIR: /media
+  POSTGRES_HOST: db
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: codequest
+  POSTGRES_USER: codequest
+  POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+  REDIS_URL: redis://redis:6379/0
+  REDIS_PASSWORD_FILE: /run/secrets/redis_password
+  CODE_JUDGE_RUNNER_URL: http://judge-gateway:8091/execute
+  CODE_JUDGE_RUNNER_TOKEN_FILE: /run/secrets/judge_runner_token
+  CODE_JUDGE_ALLOW_LOCAL_FALLBACK: "false"
+  FLASK_DEBUG: "0"
+
+services:
+  db:
+    image: ${POSTGRES_IMAGE:-progyx/postgres:${PROGYX_IMAGE_TAG:-local}}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: codequest
+      POSTGRES_USER: codequest
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [data_net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codequest -d codequest"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: *default-logging
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-1g}
+    cpus: ${POSTGRES_CPU_LIMIT:-1.0}
+    pids_limit: 256
+
+  redis:
+    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    restart: unless-stopped
+    command: ["/bin/sh", "-c", "exec redis-server --requirepass \"$$(tr -d '\\r' < /run/secrets/redis_password)\" --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru"]
+    secrets: [redis_password]
+    volumes: [redis_data:/data]
+    networks: [data_net]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$(tr -d '\\r' < /run/secrets/redis_password)\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: *default-logging
+    mem_limit: ${REDIS_MEMORY_LIMIT:-384m}
+    cpus: ${REDIS_CPU_LIMIT:-0.5}
+    pids_limit: 128
+
+  judge-runner:
+    image: ${JUDGE_RUNNER_IMAGE:-progyx/judge-runner:${PROGYX_IMAGE_TAG:-local}}
+    restart: unless-stopped
+    environment:
+      JUDGE_RUNNER_HOST: 0.0.0.0
+      JUDGE_RUNNER_PORT: "8090"
+      JUDGE_RUNNER_AUTH_TOKEN_FILE: /run/secrets/judge_runner_token
+      JUDGE_RUNNER_MAX_CONCURRENCY: ${JUDGE_RUNNER_MAX_CONCURRENCY:-4}
+      JUDGE_RUNNER_MAX_TEST_CONCURRENCY: ${JUDGE_RUNNER_MAX_TEST_CONCURRENCY:-4}
+    secrets:
+      - source: judge_runner_token
+        target: judge_runner_token
+        uid: "0"
+        gid: "0"
+        mode: 0400
+    expose: ["8090"]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    security_opt: [no-new-privileges:true, seccomp=./judge_runner/seccomp.json]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, KILL]
+    pids_limit: 128
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    ulimits:
+      nproc: 64
+      nofile: {soft: 256, hard: 256}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [judge_worker_net]
+    logging: *default-logging
+
+  judge-gateway:
+    image: ${CADDY_IMAGE:-progyx/caddy:${PROGYX_IMAGE_TAG:-local}}
+    restart: unless-stopped
+    user: "1000:1000"
+    volumes:
+      - ./deploy/judge-gateway.Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      judge-runner: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8091/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [judge_client_net, judge_worker_net]
+    read_only: true
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=16m"
+      - "/data:rw,noexec,nosuid,size=16m,uid=1000,gid=1000,mode=0700"
+      - "/config:rw,noexec,nosuid,size=16m,uid=1000,gid=1000,mode=0700"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    logging: *default-logging
+
+  volume-init:
+    image: ${BACKEND_IMAGE:-progyx/backend:${PROGYX_IMAGE_TAG:-local}}
+    user: "0:0"
+    command: ["/bin/sh", "-c", "mkdir -p /media /app/backend/logs/audit && chown -R 1001:1001 /media /app/backend/logs/audit"]
+    volumes: [media_data:/media, audit_data:/app/backend/logs/audit]
+    restart: "no"
+    network_mode: none
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE]
+    logging: *default-logging
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+
+  backend-init:
+    image: ${BACKEND_IMAGE:-progyx/backend:${PROGYX_IMAGE_TAG:-local}}
+    restart: "no"
+    env_file: [.env]
+    environment: *backend-env
+    secrets:
+      - postgres_password
+      - redis_password
+      - source: judge_runner_token
+        target: judge_runner_token
+        uid: "1001"
+        gid: "1001"
+        mode: 0400
+    volumes: [media_data:/media, audit_data:/app/backend/logs/audit]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      judge-gateway: {condition: service_healthy}
+      volume-init: {condition: service_completed_successfully}
+    command: ["python", "-m", "flask", "--app", "run.py", "bootstrap-app"]
+    networks: [data_net, judge_client_net]
+    read_only: true
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=64m"
+      - "/run/app-secrets:rw,noexec,nosuid,size=1m"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *default-logging
+    mem_limit: ${BACKEND_INIT_MEMORY_LIMIT:-1g}
+    cpus: ${BACKEND_INIT_CPU_LIMIT:-1.0}
+    pids_limit: 256
+
+  backend:
+    image: ${BACKEND_IMAGE:-progyx/backend:${PROGYX_IMAGE_TAG:-local}}
+    restart: unless-stopped
+    env_file: [.env]
+    environment: *backend-env
+    secrets:
+      - postgres_password
+      - redis_password
+      - source: judge_runner_token
+        target: judge_runner_token
+        uid: "1001"
+        gid: "1001"
+        mode: 0400
+    volumes: [media_data:/media, audit_data:/app/backend/logs/audit]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      judge-gateway: {condition: service_healthy}
+      backend-init: {condition: service_completed_successfully}
+      volume-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=2).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [app_net, data_net, judge_client_net, backend_egress_net]
+    read_only: true
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=128m"
+      - "/run/app-secrets:rw,noexec,nosuid,size=1m"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *default-logging
+    mem_limit: ${BACKEND_MEMORY_LIMIT:-1g}
+    cpus: ${BACKEND_CPU_LIMIT:-2.0}
+    pids_limit: 256
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-progyx/frontend:${PROGYX_IMAGE_TAG:-local}}
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      INTERNAL_API_URL: http://backend:8000/api
+      NEXT_TELEMETRY_DISABLED: "1"
+    depends_on:
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/auth/login').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks: [edge_net, app_net]
+    read_only: true
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=64m"
+      - "/app/.next/cache:rw,noexec,nosuid,size=256m,uid=1001,gid=1001"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *default-logging
+    mem_limit: ${FRONTEND_MEMORY_LIMIT:-1g}
+    cpus: ${FRONTEND_CPU_LIMIT:-1.0}
+    pids_limit: 256
+
+  db-backup:
+    image: ${POSTGRES_IMAGE:-progyx/postgres:${PROGYX_IMAGE_TAG:-local}}
+    restart: unless-stopped
+    depends_on: {db: {condition: service_healthy}}
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: codequest
+      PGUSER: codequest
+      PGPASSWORD_FILE: /run/secrets/postgres_password
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION_DAYS: "14"
+      BACKUP_INTERVAL_SECONDS: "86400"
+      BACKUP_MAX_AGE_SECONDS: "90000"
+    secrets: [postgres_password]
+    volumes: [postgres_backups:/backups, ./scripts/backup.sh:/usr/local/bin/backup.sh:ro, ./scripts/restore.sh:/usr/local/bin/restore.sh:ro]
+    entrypoint: ["/bin/sh", "-c", "set -eu; rm -f /backups/.last-success; export PGPASSWORD=\"$$(tr -d '\\r' < \"$$PGPASSWORD_FILE\")\"; while true; do sh /usr/local/bin/backup.sh; date +%s > /backups/.last-success; sleep \"$$BACKUP_INTERVAL_SECONDS\"; done"]
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /backups/.last-success && age=$$(($$(date +%s)-$$(cat /backups/.last-success))) && test \"$$age\" -le \"$$BACKUP_MAX_AGE_SECONDS\""]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    networks: [data_net]
+    read_only: true
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=128m"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *default-logging
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128
+
+volumes:
+  postgres_data:
+  postgres_backups:
+  redis_data:
+  media_data:
+  audit_data:
+secrets:
+  postgres_password: {file: ./secrets/postgres_password}
+  redis_password: {file: ./secrets/redis_password}
+  judge_runner_token: {file: ./secrets/judge_runner_token}
+networks:
+  edge_net:
+  backend_egress_net:
+  app_net: {internal: true}
+  data_net: {internal: true}
+  judge_client_net: {internal: true}
+  judge_worker_net: {internal: true}

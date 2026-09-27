@@ -125,6 +125,34 @@ class StaffMessagingTests(unittest.TestCase):
             r = client.get("/api/staff-messaging/search-users?q=stu")
             self.assertEqual(r.status_code, 403)
 
+    def test_staff_user_search_is_paginated_and_capped(self):
+        app = self.create_app()
+        self.create_user(app, full_name="Admin", email="paging-admin@t.com", role="admin")
+        for index in range(20):
+            self.create_user(
+                app,
+                full_name=f"Search user {index}",
+                email=f"paging-user-{index:02d}@t.com",
+                role="student",
+            )
+
+        with app.test_client() as client:
+            self.login(client, "paging-admin@t.com", "TestPass123!")
+            first = client.get(
+                "/api/staff-messaging/search-users?q=paging-user&page_size=100"
+            ).get_json()
+            second = client.get(
+                "/api/staff-messaging/search-users?q=paging-user&page=2&page_size=15"
+            ).get_json()
+            self.assertEqual(len(first["users"]), 15)
+            self.assertEqual(first["pagination"], {"page": 1, "page_size": 15, "total": 20, "total_pages": 2})
+            self.assertEqual(len(second["users"]), 5)
+            self.assertTrue(
+                {row["id"] for row in first["users"]}.isdisjoint(
+                    {row["id"] for row in second["users"]}
+                )
+            )
+
     def test_parent_messaging_summary_ok_and_staff_block(self):
         app = self.create_app()
         self.create_user(app, full_name="p1", email="p1@t.com", role="parent")

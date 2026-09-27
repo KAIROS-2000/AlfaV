@@ -23,7 +23,7 @@ import { RolePill } from '@/components/role-pill'
 import { CosmeticsShop } from '@/components/cosmetics-shop'
 import { UserAvatar } from '@/components/user-avatar'
 import { setAnonymousSession, setAuthenticatedSession } from '@/lib/session-store'
-import { setTheme } from '@/lib/theme'
+import { setThemeWithTransition } from '@/lib/theme'
 import { formatRuPhoneForDisplay } from '@/lib/phone'
 import { showErrorToast, showSuccessToast } from '@/lib/toast'
 import type { AppTheme, UserItem } from '@/types'
@@ -117,7 +117,6 @@ export function ProfileView() {
       full_name: profileResponse.user.full_name,
       theme: profileResponse.user.theme,
     })
-    setTheme(profileResponse.user.theme)
     setAchievements(achievementsResponse.achievements)
 
     const owned = new Set<string>(['light', 'dark'])
@@ -144,6 +143,9 @@ export function ProfileView() {
 
   async function handleSave(event: FormEvent) {
     event.preventDefault()
+    const submitter = (event.nativeEvent as SubmitEvent).submitter
+    const rect = submitter?.getBoundingClientRect()
+    const origin = rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : undefined
     setSaving(true)
 
     try {
@@ -156,13 +158,14 @@ export function ProfileView() {
         true,
       )
 
+      const transition = setThemeWithTransition(result.user.theme, { origin })
       setProfile(result.user)
       setAuthenticatedSession(result.user)
       setForm({
         full_name: result.user.full_name,
         theme: result.user.theme,
       })
-      setTheme(result.user.theme)
+      await transition
       showSuccessToast('Изменения профиля сохранены.')
     } catch (e) {
       showErrorToast(getApiErrorMessage(e, 'Не удалось сохранить профиль.'))

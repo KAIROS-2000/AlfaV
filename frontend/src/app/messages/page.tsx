@@ -8,7 +8,7 @@ export default async function MessagesPage({
 }: {
 	searchParams?: Promise<{ ticket?: string }>
 }) {
-	const session = await serverApi<{ user: UserItem }>('/auth/me').catch(() => null)
+	const session = await serverApi<{ user: UserItem }>('/auth/me')
 
 	if (!session?.user) {
 		redirect('/auth/login')
@@ -30,7 +30,7 @@ export default async function MessagesPage({
 
 	const initialSummary = await serverApi<MessagingSummaryResponse>(
 		'/messaging/summary',
-	).catch(() => null)
+	)
 
 	return (
 		<main className='brand-app-shell'>

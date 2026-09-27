@@ -31,6 +31,7 @@ import {
   persistParentViewMode,
 } from '@/lib/parent-view-mode'
 import type { UsefulTaskItem, UsefulTaskListResponse, UserItem } from '@/types'
+import { rejectedResults } from '@/lib/settled-results'
 
 type Child = {
   id: number
@@ -532,8 +533,9 @@ function PracticeScoreChart({ items }: { items: PracticeItem[] }) {
 
 export function ParentCabinetPage() {
   const rootRef = useRef<HTMLElement | null>(null)
+  const childLoadControllerRef = useRef<AbortController | null>(null)
   const router = useRouter()
-  const { user, status } = useSessionUser({ auth: 'required' })
+  const { user, status, error: sessionError, refresh: refreshSession } = useSessionUser({ auth: 'required' })
   const [linkCode, setLinkCode] = useState('')
   const [linkBusy, setLinkBusy] = useState(false)
   const [children, setChildren] = useState<Child[]>([])
@@ -642,90 +644,122 @@ export function ParentCabinetPage() {
 
   const loadChild = useCallback(
     async (childId: number) => {
+      childLoadControllerRef.current?.abort()
+      const controller = new AbortController()
+      childLoadControllerRef.current = controller
+      const requestInit = { signal: controller.signal }
       setLoadErr('')
+      // Never show data from the previously selected child when one of the
+      // replacement requests fails.
+      setDigest(null)
+      setSkills([])
+      setActivity(null)
+      setHistory([])
+      setSafety(null)
+      setConsent(null)
+      setBilling(null)
+      setClassroomContacts([])
+      setNotes([])
+      setAchievements([])
       try {
-        const [di, sk, act, his, sa, co, bi, th, n, ac] = await Promise.all([
+        const [di, sk, act, his, sa, co, bi, th, n, ac] = await Promise.allSettled([
           api<Record<string, unknown>>(
             `/parent/children/${childId}/digest`,
-            undefined,
+            requestInit,
             'required',
           ),
           api<{ modules: unknown[] }>(
             `/parent/children/${childId}/skills`,
-            undefined,
+            requestInit,
             'required',
           ),
           api<Record<string, unknown>>(
             `/parent/children/${childId}/activity`,
-            undefined,
+            requestInit,
             'required',
           ),
           api<{ items: unknown[] }>(
             `/parent/children/${childId}/practice-history`,
-            undefined,
+            requestInit,
             'required',
           ),
           api<Record<string, unknown>>(
             `/parent/children/${childId}/safety`,
-            undefined,
+            requestInit,
             'required',
           ),
           api<Record<string, unknown>>(
             `/parent/children/${childId}/consent`,
-            undefined,
+            requestInit,
             'required',
           ),
-          api<Record<string, unknown>>('/parent/billing', undefined, 'required'),
+          api<Record<string, unknown>>('/parent/billing', requestInit, 'required'),
           api<{
             threads?: Array<Record<string, unknown>>
             classroom_contacts?: ParentClassroomContact[]
-          }>('/parent/messaging/threads', undefined, 'required'),
-          api<{ notifications: unknown[] }>('/parent/notifications', undefined, 'required'),
+          }>('/parent/messaging/threads', requestInit, 'required'),
+          api<{ notifications: unknown[] }>('/parent/notifications', requestInit, 'required'),
           api<{ achievements: unknown[] }>(
             `/parent/children/${childId}/achievements`,
-            undefined,
+            requestInit,
             'required',
           ),
         ])
-        setDigest(di)
-        setSkills(sk.modules || [])
-        setActivity(act)
-        setHistory(his.items || [])
-        setSafety(sa)
-        setConsent(co)
-        setBilling(bi)
-        const raw = th.classroom_contacts
-        if (raw && raw.length) {
-          setClassroomContacts(raw)
-        } else if (th.threads?.length) {
-          setClassroomContacts(
-            (
-              th.threads as Array<{
-                id: number
-                child: ParentClassroomContact['child']
-                teacher: ParentClassroomContact['teacher']
-                classroom: ParentClassroomContact['classroom']
-                updated_at?: string | null
-                latest_preview?: string | null
-                unread_count?: number
-              }>
-            ).map(t => ({
-              thread_id: t.id,
-              child: t.child,
-              teacher: t.teacher,
-              classroom: t.classroom,
-              updated_at: t.updated_at ?? null,
-              latest_preview: t.latest_preview ?? null,
-              unread_count: t.unread_count ?? 0,
-              can_message: true,
-            })),
-          )
-        } else {
-          setClassroomContacts([])
+        if (controller.signal.aborted || childLoadControllerRef.current !== controller) return
+
+        if (di.status === 'fulfilled') setDigest(di.value)
+        if (sk.status === 'fulfilled') setSkills(sk.value.modules || [])
+        if (act.status === 'fulfilled') setActivity(act.value)
+        if (his.status === 'fulfilled') setHistory(his.value.items || [])
+        if (sa.status === 'fulfilled') setSafety(sa.value)
+        if (co.status === 'fulfilled') setConsent(co.value)
+        if (bi.status === 'fulfilled') setBilling(bi.value)
+        if (th.status === 'fulfilled') {
+          const raw = th.value.classroom_contacts
+          if (raw && raw.length) {
+            setClassroomContacts(raw)
+          } else if (th.value.threads?.length) {
+            setClassroomContacts(
+              (
+                th.value.threads as Array<{
+                  id: number
+                  child: ParentClassroomContact['child']
+                  teacher: ParentClassroomContact['teacher']
+                  classroom: ParentClassroomContact['classroom']
+                  updated_at?: string | null
+                  latest_preview?: string | null
+                  unread_count?: number
+                }>
+              ).map(t => ({
+                thread_id: t.id,
+                child: t.child,
+                teacher: t.teacher,
+                classroom: t.classroom,
+                updated_at: t.updated_at ?? null,
+                latest_preview: t.latest_preview ?? null,
+                unread_count: t.unread_count ?? 0,
+                can_message: true,
+              })),
+            )
+          } else {
+            setClassroomContacts([])
+          }
         }
-        setNotes(n.notifications || [])
-        setAchievements(ac.achievements || [])
+        if (n.status === 'fulfilled') setNotes(n.value.notifications || [])
+        if (ac.status === 'fulfilled') setAchievements(ac.value.achievements || [])
+
+        const failed = rejectedResults([di, sk, act, his, sa, co, bi, th, n, ac])
+        if (failed.length) {
+          const first = failed[0]
+          setLoadErr(
+            getApiErrorMessage(
+              first.reason,
+              `Не удалось загрузить часть разделов (${failed.length} из 10).`,
+            ),
+          )
+        }
       } catch (e) {
+        if (controller.signal.aborted) return
         setLoadErr(getApiErrorMessage(e, 'Не удалось загрузить раздел.'))
       }
     },
@@ -739,6 +773,7 @@ export function ParentCabinetPage() {
 
   useEffect(() => {
     if (selected) void loadChild(selected)
+    return () => childLoadControllerRef.current?.abort()
   }, [selected, loadChild])
 
   // Useful tasks (P2 widget): fetch top items filtered by the child's age_group.
@@ -1039,6 +1074,26 @@ export function ParentCabinetPage() {
   const parentMetrics = viewMode === 'simple'
     ? allParentMetrics.filter(metric => metric.simple)
     : allParentMetrics
+
+  if (sessionError) {
+    return (
+      <div className="brand-page-shell py-10">
+        <div role="alert" className="codequest-card mx-auto max-w-xl p-6">
+          <h1 className="text-xl font-black text-slate-900">Не удалось проверить сессию</h1>
+          <p className="mt-2 text-sm leading-6 text-slate-600">
+            Проверьте соединение и попробуйте снова. Мы не перенаправляем вас на вход при временной ошибке сервера.
+          </p>
+          <button
+            className="brand-button-primary mt-5"
+            type="button"
+            onClick={() => void refreshSession().catch(() => undefined)}
+          >
+            Повторить
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   if (status === 'unknown' || !user || user.role !== 'parent') {
     return <div className="codequest-card p-6">Загружаем кабинет…</div>

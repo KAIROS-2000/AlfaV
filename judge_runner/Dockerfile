@@ -1,54 +1,22 @@
-# ---------------------------------------------------------------------------
-# Image pinning REQUIRED for production.
-# This Dockerfile keeps a floating tag for local/dev builds. For production,
-# replace the FROM line with an explicit digest, e.g.:
-#   FROM python:3.12-slim@sha256:<digest>
-# See docs/operations/image-pinning.md and scripts/pin-images.sh for the
-# exact commands used to compute and track digests.
-# ---------------------------------------------------------------------------
-# Also: the NodeSource / Debian `nodejs` package below is *not* version-pinned.
-# For production the operator SHOULD pin an exact package version by supplying
-# --build-arg NODEJS_APT_VERSION=<version>. The default leaves the apt resolver
-# to pick bookworm's current nodejs. Trade-off documented in
-# docs/operations/sandbox.md (P0-4 notes).
-# ---------------------------------------------------------------------------
+# syntax=docker/dockerfile:1.7
+# Copy the exact same Debian Node runtime used by the frontend. This avoids
+# relying on a package version that can disappear from Debian repositories.
+FROM node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS node-runtime
 
-FROM python:3.12-slim
-# pin: python:3.12-slim  (replace with @sha256:<digest> before prod build)
-
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
 WORKDIR /app
-
-ARG NODEJS_APT_VERSION=""
-RUN set -eux; \
-    apt-get update; \
-    if [ -n "$NODEJS_APT_VERSION" ]; then \
-        apt-get install -y --no-install-recommends \
-            "nodejs=${NODEJS_APT_VERSION}" \
-            ca-certificates; \
-    else \
-        apt-get install -y --no-install-recommends \
-            nodejs \
-            ca-certificates; \
-    fi; \
-    rm -rf /var/lib/apt/lists/*
-
-# The HTTP dispatcher starts as root only to create a new numeric UID-owned
-# workspace for every submission, then its child drops to that UID before
-# executing untrusted code. docker-compose drops every capability by default
-# and adds back only CHOWN/SETUID/SETGID/DAC_OVERRIDE/KILL for this dispatcher
-# work and final per-UID worker cleanup.
-RUN groupadd --system --gid 1001 judgeuser \
-    && useradd --system --uid 1001 --gid 1001 \
-        --home-dir /home/judgeuser --create-home \
-        --shell /usr/sbin/nologin judgeuser
-
-COPY judge_runner /app/judge_runner
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1001 judgeuser \
+    && useradd --system --uid 1001 --gid 1001 --home-dir /home/judgeuser --create-home --shell /usr/sbin/nologin judgeuser
+COPY judge_runner/app.py /app/judge_runner/app.py
+COPY judge_runner/network_isolation_smoke.py /app/judge_runner/network_isolation_smoke.py
 COPY shared /app/shared
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     JUDGE_RUNNER_HOST=0.0.0.0 \
     JUDGE_RUNNER_PORT=8090
-
 CMD ["python", "judge_runner/app.py"]

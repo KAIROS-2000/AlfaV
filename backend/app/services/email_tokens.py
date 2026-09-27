@@ -24,6 +24,7 @@ from sqlalchemy import func
 
 from ..core.db import db
 from ..models.user import (
+    EMAIL_TOKEN_PURPOSE_PARENT_PASSWORD_SETUP,
     EMAIL_TOKEN_PURPOSE_PASSWORD_RESET,
     EMAIL_TOKEN_PURPOSE_VERIFICATION,
     EmailToken,
@@ -55,6 +56,11 @@ def _verification_ttl() -> timedelta:
 
 def _password_reset_ttl() -> timedelta:
     minutes = max(int(current_app.config.get('PASSWORD_RESET_TOKEN_TTL_MINUTES') or 30), 1)
+    return timedelta(minutes=minutes)
+
+
+def _parent_password_setup_ttl() -> timedelta:
+    minutes = max(int(current_app.config.get('PARENT_PASSWORD_SETUP_TOKEN_TTL_MINUTES') or 1440), 1)
     return timedelta(minutes=minutes)
 
 
@@ -111,7 +117,10 @@ def issue_verification_token(user: User) -> IssuedToken:
 def _latest_verification_expiry(user_id: int) -> datetime | None:
     return db.session.query(func.max(EmailToken.expires_at)).filter(
         EmailToken.user_id == user_id,
-        EmailToken.purpose == EMAIL_TOKEN_PURPOSE_VERIFICATION,
+        EmailToken.purpose.in_({
+            EMAIL_TOKEN_PURPOSE_VERIFICATION,
+            EMAIL_TOKEN_PURPOSE_PARENT_PASSWORD_SETUP,
+        }),
     ).scalar()
 
 
@@ -143,7 +152,10 @@ def cleanup_expired_unverified_users(now: datetime | None = None) -> int:
             EmailToken.user_id.label('user_id'),
             func.max(EmailToken.expires_at).label('latest_expires_at'),
         )
-        .filter(EmailToken.purpose == EMAIL_TOKEN_PURPOSE_VERIFICATION)
+        .filter(EmailToken.purpose.in_({
+            EMAIL_TOKEN_PURPOSE_VERIFICATION,
+            EMAIL_TOKEN_PURPOSE_PARENT_PASSWORD_SETUP,
+        }))
         .group_by(EmailToken.user_id)
         .subquery()
     )
@@ -189,6 +201,21 @@ def issue_password_reset_token(user: User) -> IssuedToken:
     return issue_token(user, EMAIL_TOKEN_PURPOSE_PASSWORD_RESET, ttl=_password_reset_ttl())
 
 
+def issue_parent_password_setup_token(user: User) -> IssuedToken:
+    """Issue the only credential sent for a new parent account.
+
+    The raw value is delivered as a one-time reset-password link; no plaintext
+    password is ever returned by the API or included in email.
+    """
+
+    invalidate_active_tokens(user, EMAIL_TOKEN_PURPOSE_PARENT_PASSWORD_SETUP)
+    return issue_token(
+        user,
+        EMAIL_TOKEN_PURPOSE_PARENT_PASSWORD_SETUP,
+        ttl=_parent_password_setup_ttl(),
+    )
+
+
 @dataclass
 class ConsumeResult:
     token: EmailToken | None
@@ -196,7 +223,12 @@ class ConsumeResult:
     error: str | None = None
 
 
-def consume_token(raw_token: str, purpose: str) -> ConsumeResult:
+def consume_token(
+    raw_token: str,
+    purpose: str,
+    *,
+    allow_inactive_user: bool = False,
+) -> ConsumeResult:
     """Lookup a token by hash, validate TTL/used_at, and mark it used atomically.
 
     On success the caller still owns the transaction commit (we only flush) so
@@ -221,7 +253,7 @@ def consume_token(raw_token: str, purpose: str) -> ConsumeResult:
         return ConsumeResult(token=record, user=record.user, error='expired_token')
 
     user = record.user or db.session.get(User, record.user_id)
-    if user is None or not user.is_active:
+    if user is None or (not user.is_active and not allow_inactive_user):
         return ConsumeResult(token=record, user=user, error='user_unavailable')
 
     record.used_at = now

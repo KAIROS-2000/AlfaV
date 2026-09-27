@@ -48,6 +48,7 @@ from ..core.security import (
     verify_password,
 )
 from ..models.user import (
+    EMAIL_TOKEN_PURPOSE_PARENT_PASSWORD_SETUP,
     EMAIL_TOKEN_PURPOSE_PASSWORD_RESET,
     EMAIL_TOKEN_PURPOSE_VERIFICATION,
     TEACHER_APPROVAL_APPROVED,
@@ -67,6 +68,7 @@ from ..services.email_tokens import (
     consume_token,
     delete_unverified_user_if_verification_expired,
     invalidate_active_tokens,
+    issue_parent_password_setup_token,
     issue_password_reset_token,
     issue_verification_token,
 )
@@ -89,6 +91,31 @@ def normalize_age_group(value: str | None) -> str | None:
     return normalized if normalized in VALID_AGE_GROUPS else None
 
 
+def _legal_acknowledgement_error(data: dict) -> tuple[dict, int] | None:
+    expected_version = str(current_app.config.get('LEGAL_DOCUMENTS_VERSION') or '').strip()
+    if (
+        data.get('privacy_accepted') is not True
+        or data.get('terms_accepted') is not True
+        or data.get('personal_data_accepted') is not True
+    ):
+        return {
+            'message': (
+                'Необходимо принять политику конфиденциальности, условия использования '
+                'и согласие на обработку персональных данных.'
+            ),
+            'code': 'legal_consent_required',
+            'legal_documents_version': expected_version,
+        }, 400
+    supplied_version = str(data.get('legal_documents_version') or '').strip()
+    if not expected_version or supplied_version != expected_version:
+        return {
+            'message': 'Версия юридических документов изменилась. Ознакомьтесь с ними повторно.',
+            'code': 'legal_version_mismatch',
+            'legal_documents_version': expected_version,
+        }, 400
+    return None
+
+
 def _cleanup_expired_auth_accounts() -> int:
     deleted = cleanup_expired_teacher_requests()
     deleted += cleanup_expired_unverified_users()
@@ -102,6 +129,7 @@ def register_options():
     return {
         'roles': [UserRole.STUDENT.value, UserRole.TEACHER.value, UserRole.PARENT.value],
         'age_groups': sorted(VALID_AGE_GROUPS),
+        'parent_password_required': not current_app.config.get('SEND_MAIL', True),
     }
 
 
@@ -117,11 +145,11 @@ def register():
     * **teacher** — email + phone + password. NO session, status `pending`,
       admin must approve. Email verification is normally required at login; with
       ``SEND_MAIL`` false the email is treated as verified from creation (mail is not sent).
-    * **parent** — ONLY email is accepted. The backend generates a strong
-      random password, persists its hash, and normally sends a welcome email
-      with password + verification link. With ``SEND_MAIL`` false, no email is sent,
-      the parent is marked verified, and the plaintext ``initial_password`` is
-      returned in the JSON response (dev/local only — keep ``SEND_MAIL`` true in production).
+    * **parent** — email-only in normal deployments. The inactive account is
+      created only after a one-time password-setup link is delivered. Following
+      that link sets a caller-chosen password, verifies the email, and activates
+      the account. With ``SEND_MAIL`` false a caller-provided password is required;
+      generated plaintext passwords are never returned by the API.
     """
 
     ip = request.remote_addr or 'unknown'
@@ -147,6 +175,12 @@ def register():
         register_register_failure(email, ip)
         db.session.commit()
         return {'message': 'Укажите корректный email.'}, 400
+
+    legal_error = _legal_acknowledgement_error(data)
+    if legal_error is not None:
+        register_register_failure(email, ip)
+        db.session.commit()
+        return legal_error
 
     _cleanup_expired_auth_accounts()
 
@@ -205,6 +239,8 @@ def _register_student_or_teacher(email: str, role: str, data: dict, ip: str):
         else TEACHER_APPROVAL_APPROVED,
         email_verified=auto_verify_email,
         password_changed_at=now,
+        legal_documents_version=current_app.config['LEGAL_DOCUMENTS_VERSION'],
+        legal_documents_accepted_at=now,
     )
     if auto_verify_email:
         user.email_verified_at = now
@@ -271,7 +307,7 @@ def _register_student_or_teacher(email: str, role: str, data: dict, ip: str):
 
 
 def _register_parent(email: str, data: dict, ip: str):
-    """Parent: email-only signup, instant session, password delivered by email."""
+    """Register a parent without ever transporting a plaintext password."""
 
     if User.query.filter(User.email == email).first():
         register_register_failure(email, ip)
@@ -280,65 +316,86 @@ def _register_parent(email: str, data: dict, ip: str):
 
     send_mail = current_app.config.get('SEND_MAIL', True)
     now = datetime.now(UTC)
-    initial_password = generate_initial_password()
+    supplied_password = data.get('password') or ''
+    if not send_mail:
+        password_error = validate_password(supplied_password)
+        if password_error:
+            register_register_failure(email, ip)
+            db.session.commit()
+            return {
+                'message': password_error,
+                'code': 'parent_password_required',
+            }, 400
+
+    # The random value is never returned or sent. It only ensures that an
+    # account awaiting setup has no usable credential before activation.
+    password_material = supplied_password if not send_mail else generate_initial_password(32)
     requested_theme = data.get('theme') if data.get('theme') in {'light', 'dark'} else 'light'
     auto_verify = not send_mail
     user = User(
         full_name='',  # parent fills name later, before linking a child
         email=email,
         phone=None,
-        password_hash=hash_password(initial_password),
+        password_hash=hash_password(password_material),
         role=UserRole.PARENT,
         age_group=None,
         theme=requested_theme,
-        is_active=True,
+        is_active=not send_mail,
         teacher_approval_status=TEACHER_APPROVAL_APPROVED,
         email_verified=auto_verify,
         password_changed_at=now,
+        legal_documents_version=current_app.config['LEGAL_DOCUMENTS_VERSION'],
+        legal_documents_accepted_at=now,
     )
     if auto_verify:
         user.email_verified_at = now
     db.session.add(user)
     db.session.flush()
 
-    welcome_sent = False
     if send_mail:
-        issued = issue_verification_token(user)
-        welcome_sent = _try_send_parent_welcome_email(user, initial_password, issued.raw_token)
+        issued = issue_parent_password_setup_token(user)
+        welcome_sent = _try_send_parent_welcome_email(user, issued.raw_token)
+        if not welcome_sent:
+            # Do not leave behind an unusable/inactive account that blocks a
+            # retry, and never issue a session when delivery did not succeed.
+            db.session.rollback()
+            return {
+                'message': 'Не удалось отправить письмо для задания пароля. Повторите регистрацию позже.',
+                'code': 'parent_setup_delivery_failed',
+                'retryable': True,
+            }, 503
 
-    user.touch_login()
-    tokens = create_token_pair(user)
     clear_register_throttle(email, ip)
     db.session.commit()
 
-    profile_fields = ['full_name', 'phone']
     if send_mail:
-        profile_fields.append('email_verified')
+        return {
+            'message': (
+                'Мы отправили одноразовую ссылку для задания пароля. Откройте письмо, '
+                'задайте пароль и затем войдите в семейный кабинет.'
+            ),
+            'user': user.to_dict(),
+            'requires_password_setup': True,
+            'password_setup_email_sent': True,
+            'requires_email_verification': True,
+            'requires_login_after_password_setup': True,
+            'parent_profile_required_fields': ['password', 'full_name', 'phone'],
+        }, 201
 
-    body: dict = {
+    user.touch_login()
+    tokens = create_token_pair(user)
+    db.session.commit()
+    response = make_response({
         'message': (
-            (
-                'Семейный кабинет создан. Мы отправили на почту временный пароль и ссылку '
-                'для подтверждения email. Подтвердите почту, заполните имя и телефон — '
-                'и сможете привязать ребёнка.'
-            )
-            if send_mail
-            else (
-                'Семейный кабинет создан. Отправка писем отключена — email считается '
-                'подтверждённым. Заполните имя и телефон, чтобы привязать ребёнка. '
-                'Временный пароль показан один раз на экране регистрации.'
-            )
+            'Семейный кабинет создан. Отправка писем отключена — email считается '
+            'подтверждённым. Заполните имя и телефон, чтобы привязать ребёнка.'
         ),
         'user': user.to_dict(),
-        'verification_email_sent': welcome_sent,
-        'requires_email_verification': send_mail,
-        'parent_initial_password_sent': welcome_sent,
-        'parent_profile_required_fields': profile_fields,
-    }
-    if not send_mail:
-        body['initial_password'] = initial_password
-
-    response = make_response(body, 201)
+        'requires_password_setup': False,
+        'password_setup_email_sent': False,
+        'requires_email_verification': False,
+        'parent_profile_required_fields': ['full_name', 'phone'],
+    }, 201)
     return set_auth_cookies(response, tokens['access_token'], tokens['refresh_token'])
 
 
@@ -365,9 +422,9 @@ def _try_send_verification_email(user: User, raw_token: str) -> bool:
         return False
 
 
-def _try_send_parent_welcome_email(user: User, raw_password: str, raw_token: str) -> bool:
+def _try_send_parent_welcome_email(user: User, raw_token: str) -> bool:
     try:
-        send_parent_welcome_email(user, raw_password, raw_token)
+        send_parent_welcome_email(user, raw_token)
         return True
     except EmailServiceError as exc:
         _log.warning(
@@ -664,6 +721,25 @@ def resend_verification():
         ),
     }
 
+    if (
+        user is not None
+        and user.role == UserRole.PARENT
+        and not user.is_active
+        and not user.email_verified
+    ):
+        if not current_app.config.get('SEND_MAIL', True):
+            db.session.commit()
+            return neutral_response
+        issued = issue_parent_password_setup_token(user)
+        sent = _try_send_parent_welcome_email(user, issued.raw_token)
+        if sent:
+            db.session.commit()
+        else:
+            # Preserve the previous setup link if the replacement could not be
+            # delivered; anonymous callers still receive the neutral response.
+            db.session.rollback()
+        return neutral_response
+
     if user is None or not user.is_active:
         db.session.commit()
         return neutral_response
@@ -746,6 +822,24 @@ def reset_password():
         return {'message': password_error, 'code': 'weak_password'}, 400
 
     result = consume_token(raw_token, EMAIL_TOKEN_PURPOSE_PASSWORD_RESET)
+    is_parent_password_setup = False
+    if result.error == 'invalid_token':
+        result = consume_token(
+            raw_token,
+            EMAIL_TOKEN_PURPOSE_PARENT_PASSWORD_SETUP,
+            allow_inactive_user=True,
+        )
+        is_parent_password_setup = result.token is not None
+    if (
+        is_parent_password_setup
+        and result.user is not None
+        and result.user.role != UserRole.PARENT
+    ):
+        db.session.rollback()
+        return {
+            'message': 'Аккаунт недоступен. Обратитесь в поддержку.',
+            'code': 'user_unavailable',
+        }, 400
     if result.error == 'invalid_token':
         return {
             'message': 'Ссылка для сброса пароля недействительна.',
@@ -770,14 +864,26 @@ def reset_password():
     user = result.user
     user.password_hash = hash_password(new_password)
     user.password_changed_at = datetime.now(UTC)
+    if is_parent_password_setup:
+        user.is_active = True
+        user.email_verified = True
+        user.email_verified_at = datetime.now(UTC)
     user.bump_session_version()
     invalidate_session_version_cache(user.id)
     revoke_refresh_tokens_for_user(user.id)
     # Cap the blast radius: any other live reset link for this user stops
     # working immediately after the first successful reset.
     invalidate_active_tokens(user, EMAIL_TOKEN_PURPOSE_PASSWORD_RESET)
+    invalidate_active_tokens(user, EMAIL_TOKEN_PURPOSE_PARENT_PASSWORD_SETUP)
     db.session.commit()
 
-    return {
+    response = {
         'message': 'Пароль обновлён. Войдите с новым паролем.',
     }
+    if is_parent_password_setup:
+        response.update({
+            'password_setup_completed': True,
+            'email_verified': True,
+            'requires_login': True,
+        })
+    return response

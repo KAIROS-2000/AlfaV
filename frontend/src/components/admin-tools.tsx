@@ -4,14 +4,17 @@ import Link from 'next/link'
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 
 import { UserLocalTime } from '@/components/user-local-time'
+import { clampPageToPagination, FiveItemPager, SERVER_PAGE_SIZE, useFiveItemWindow } from '@/components/five-item-navigator'
 
 import { AdminLessonBuilder } from '@/components/admin-lesson-builder'
+import { AdminLessonLifecycleLists } from '@/components/lesson-lifecycle-lists'
 import { api } from '@/lib/api'
 import { formatLocalInstantForFilenameStem } from '@/lib/user-local-time'
 import { PUBLIC_API_URL } from '@/lib/public-env'
 import { showErrorToast, showInfoToast, showSuccessToast } from '@/lib/toast'
 import type {
   AdminAdminDirectoryResponse,
+  AdminModulesResponse,
   AdminAuditLogItem,
   AdminAuditLogArchivesResponse,
   AdminAuditLogResponse,
@@ -21,13 +24,12 @@ import type {
   AdminUserDirectoryResponse,
   AdminUserListItem,
   ModuleItem,
-  PaginationMeta,
   SiteActivityLogItem,
   SiteActivityLogResponse,
   TeacherApprovalStatus,
 } from '@/types'
 
-const DIRECTORY_PAGE_SIZE = 20
+const DIRECTORY_PAGE_SIZE = SERVER_PAGE_SIZE
 
 type ArchivePick = { kind: 'daily' | 'manual'; value: string }
 
@@ -200,46 +202,6 @@ function accountStatusBadge(user: AdminUserListItem) {
   return user.is_active
     ? { label: 'Активен', modifier: 'admin-status-badge--active' }
     : { label: 'Заблокирован', modifier: 'admin-status-badge--blocked' }
-}
-
-function PaginationControls({
-  pagination,
-  loading,
-  onPageChange,
-}: {
-  pagination?: PaginationMeta
-  loading: boolean
-  onPageChange: (page: number) => void
-}) {
-  if (!pagination || pagination.total_pages <= 1) {
-    return null
-  }
-
-  return (
-    <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-4">
-      <p className="text-sm text-slate-500">
-        Страница {pagination.page} из {pagination.total_pages} · всего {pagination.total}
-      </p>
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          className="brand-button-secondary min-h-[2.75rem] px-4 py-2 text-sm"
-          disabled={loading || pagination.page <= 1}
-          onClick={() => onPageChange(pagination.page - 1)}
-        >
-          Назад
-        </button>
-        <button
-          type="button"
-          className="brand-button-secondary min-h-[2.75rem] px-4 py-2 text-sm"
-          disabled={loading || pagination.page >= pagination.total_pages}
-          onClick={() => onPageChange(pagination.page + 1)}
-        >
-          Далее
-        </button>
-      </div>
-    </div>
-  )
 }
 
 function AccountCard({
@@ -439,6 +401,13 @@ export function AdminUsersPanel({
   const [loading, setLoading] = useState(!initialData)
   const [busyUserId, setBusyUserId] = useState<number | null>(null)
   const skipInitialLoad = useRef(Boolean(initialData))
+  const usersWindow = useFiveItemWindow({
+    items: response?.users ?? [],
+    pagination: response?.pagination,
+    loading,
+    onPageChange: setPage,
+    resetKey: `${email}|${status}`,
+  })
 
   async function load(next?: {
     email?: string
@@ -558,7 +527,7 @@ export function AdminUsersPanel({
 
       <section className="codequest-card p-6 sm:p-7">
         <div className="space-y-4">
-          {(response?.users ?? []).map((user) => (
+          {usersWindow.visibleItems.map((user) => (
             <AccountCard key={user.id} user={user}>
               <button
                 type="button"
@@ -597,11 +566,7 @@ export function AdminUsersPanel({
           </div>
         ) : null}
 
-        <PaginationControls
-          pagination={response?.pagination}
-          loading={loading}
-          onPageChange={(nextPage) => setPage(nextPage)}
-        />
+        <FiveItemPager window={usersWindow} loading={loading} itemLabel='пользователей' className='mt-6 border-t border-slate-200 pt-4' />
       </section>
     </div>
   )
@@ -621,6 +586,13 @@ export function AdminTeacherRequestsPanel({
   const [loading, setLoading] = useState(!initialData)
   const [busyUserId, setBusyUserId] = useState<number | null>(null)
   const skipInitialLoad = useRef(Boolean(initialData))
+  const requestsWindow = useFiveItemWindow({
+    items: response?.teacher_requests ?? [],
+    pagination: response?.pagination,
+    loading,
+    onPageChange: setPage,
+    resetKey: `${email}|${status}`,
+  })
 
   async function load(next?: {
     email?: string
@@ -742,7 +714,7 @@ export function AdminTeacherRequestsPanel({
 
       <section className="codequest-card p-6 sm:p-7">
         <div className="space-y-4">
-          {(response?.teacher_requests ?? []).map((user) => {
+          {requestsWindow.visibleItems.map((user) => {
             const approvalStatus = user.teacher_approval_status ?? 'approved'
             return (
               <AccountCard key={user.id} user={user}>
@@ -780,11 +752,7 @@ export function AdminTeacherRequestsPanel({
           </div>
         ) : null}
 
-        <PaginationControls
-          pagination={response?.pagination}
-          loading={loading}
-          onPageChange={(nextPage) => setPage(nextPage)}
-        />
+        <FiveItemPager window={requestsWindow} loading={loading} itemLabel='заявок' className='mt-6 border-t border-slate-200 pt-4' />
       </section>
     </div>
   )
@@ -809,6 +777,13 @@ export function SuperadminAdminsPanel({
     password: '',
   })
   const skipInitialLoad = useRef(Boolean(initialData))
+  const adminsWindow = useFiveItemWindow({
+    items: response?.admins ?? [],
+    pagination: response?.pagination,
+    loading,
+    onPageChange: setPage,
+    resetKey: `${email}|${status}`,
+  })
 
   async function load(next?: {
     email?: string
@@ -975,7 +950,7 @@ export function SuperadminAdminsPanel({
 
         <section className="codequest-card p-6 sm:p-7">
           <div className="space-y-4">
-            {(response?.admins ?? []).map((user) => (
+            {adminsWindow.visibleItems.map((user) => (
               <AccountCard key={user.id} user={user}>
                 <button
                   type="button"
@@ -1014,11 +989,7 @@ export function SuperadminAdminsPanel({
             </div>
           ) : null}
 
-          <PaginationControls
-            pagination={response?.pagination}
-            loading={loading}
-            onPageChange={(nextPage) => setPage(nextPage)}
-          />
+          <FiveItemPager window={adminsWindow} loading={loading} itemLabel='администраторов' className='mt-6 border-t border-slate-200 pt-4' />
         </section>
       </div>
     </div>
@@ -1026,13 +997,21 @@ export function SuperadminAdminsPanel({
 }
 
 export function AdminModulesPanel({
-  initialModules,
+  initialData,
 }: {
-  initialModules: ModuleItem[] | null
+  initialData: AdminModulesResponse | null
 }) {
-  const [modules, setModules] = useState<ModuleItem[]>(initialModules ?? [])
-  const [loading, setLoading] = useState(!initialModules)
+  const [response, setResponse] = useState<AdminModulesResponse | null>(initialData)
+  const [page, setPage] = useState(initialData?.pagination.page ?? 1)
+  const [loading, setLoading] = useState(!initialData)
   const [busyModuleId, setBusyModuleId] = useState<number | null>(null)
+  const [editingModule, setEditingModule] = useState<ModuleItem | null>(null)
+  const [editingModuleForm, setEditingModuleForm] = useState({
+    title: '',
+    description: '',
+    age_group: 'middle',
+    color: '#4A90D9',
+  })
   const [moduleForm, setModuleForm] = useState({
     slug: '',
     title: '',
@@ -1041,25 +1020,37 @@ export function AdminModulesPanel({
     color: '#4A90D9',
   })
 
-  const roadmapModules = modules.filter((module) => !module.is_custom_classroom_module)
+  const roadmapModules = (response?.modules ?? []).filter((module) => !module.is_custom_classroom_module)
   const publishedModules = roadmapModules.filter((module) => module.is_published)
+  const moduleStats = response?.stats
+  const modulesWindow = useFiveItemWindow({
+    items: roadmapModules,
+    pagination: response?.pagination,
+    loading,
+    onPageChange: setPage,
+  })
 
-  async function loadModules() {
+  async function loadModules(nextPage = page) {
     setLoading(true)
     try {
-      const data = await api<{ modules: ModuleItem[] }>('/admin/modules', undefined, 'required')
-      setModules(data.modules)
+      const data = await api<AdminModulesResponse>(`/admin/modules?page=${nextPage}&page_size=${DIRECTORY_PAGE_SIZE}`, undefined, 'required')
+      setResponse(data)
+      const clampedPage = clampPageToPagination(nextPage, data.pagination)
+      if (clampedPage !== nextPage) setPage(clampedPage)
+      return data
     } catch (error) {
       showErrorToast(describeError(error, 'Не удалось загрузить каталог модулей.'))
+      return null
     } finally {
       setLoading(false)
     }
   }
 
   useEffect(() => {
-    if (initialModules) return
-    void loadModules()
-  }, [initialModules])
+    if (initialData && page === initialData.pagination.page) return
+    void loadModules(page)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialData, page])
 
   async function createModule(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -1129,9 +1120,40 @@ export function AdminModulesPanel({
         'required',
       )
       showSuccessToast(response.message || 'Модуль удалён.')
-      await loadModules()
+      await loadModules(page)
     } catch (error) {
       showErrorToast(describeError(error, 'Не удалось удалить модуль.'))
+    } finally {
+      setBusyModuleId(null)
+    }
+  }
+
+  function beginModuleEdit(module: ModuleItem) {
+    setEditingModule(module)
+    setEditingModuleForm({
+      title: module.title,
+      description: module.description,
+      age_group: module.age_group,
+      color: module.color,
+    })
+  }
+
+  async function saveModuleEdit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!editingModule) return
+    setBusyModuleId(editingModule.id)
+    try {
+      await api(
+        `/admin/modules/${editingModule.id}`,
+        { method: 'PATCH', body: JSON.stringify(editingModuleForm) },
+        'required',
+      )
+      showSuccessToast('Настройки модуля сохранены.')
+      setEditingModule(null)
+      setPage(1)
+      await loadModules(1)
+    } catch (error) {
+      showErrorToast(describeError(error, 'Не удалось сохранить настройки модуля.'))
     } finally {
       setBusyModuleId(null)
     }
@@ -1218,16 +1240,18 @@ export function AdminModulesPanel({
             </div>
             <div className="flex flex-wrap gap-2">
               <span className="brand-chip brand-chip--soft">
-                {loading ? 'Загрузка…' : `${roadmapModules.length} модулей`}
+                {loading ? 'Загрузка…' : `${moduleStats?.total ?? response?.pagination.total ?? 0} модулей`}
               </span>
-              <span className="brand-chip brand-chip--warm">{publishedModules.length} опубликовано</span>
+              <span className="brand-chip brand-chip--warm">
+                {moduleStats ? `${moduleStats.published} опубликовано` : `${publishedModules.length} опубликовано на странице`}
+              </span>
             </div>
           </div>
         </section>
 
         <section className="codequest-card p-6 sm:p-7">
           <div className="space-y-4">
-            {roadmapModules.map((module) => (
+            {modulesWindow.visibleItems.map((module) => (
               <article
                 key={module.id}
                 className="rounded-[1.75rem] border border-slate-200 bg-white/80 p-5 shadow-[0_18px_38px_rgba(17,40,93,0.06)]"
@@ -1252,7 +1276,7 @@ export function AdminModulesPanel({
                         {AGE_GROUP_LABELS[module.age_group] || module.age_group}
                       </span>
                       <span className="brand-chip brand-chip--soft min-h-[2rem] px-3 py-1 text-[0.68rem]">
-                        {module.lessons.length} уроков
+                        {module.lessons_count ?? module.lesson_count ?? module.lessons.length} уроков
                       </span>
                       <span className="brand-chip brand-chip--soft min-h-[2rem] px-3 py-1 text-[0.68rem]">
                         {module.slug}
@@ -1274,6 +1298,14 @@ export function AdminModulesPanel({
                           ? 'Снять с публикации'
                           : 'Опубликовать'}
                     </button>
+                    <button
+                      type="button"
+                      className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700"
+                      disabled={busyModuleId === module.id}
+                      onClick={() => beginModuleEdit(module)}
+                    >
+                      Редактировать
+                    </button>
                     {!module.is_published ? (
                       <button
                         type="button"
@@ -1286,6 +1318,30 @@ export function AdminModulesPanel({
                     ) : null}
                   </div>
                 </div>
+                {editingModule?.id === module.id ? (
+                  <form onSubmit={saveModuleEdit} className="mt-5 grid gap-4 rounded-[1.25rem] border border-sky-100 bg-sky-50/60 p-4 sm:grid-cols-2">
+                    <label className="space-y-2">
+                      <span className="text-sm font-semibold text-slate-700">Название</span>
+                      <input className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2" required value={editingModuleForm.title} onChange={(event) => setEditingModuleForm({ ...editingModuleForm, title: event.target.value })} />
+                    </label>
+                    <label className="space-y-2">
+                      <span className="text-sm font-semibold text-slate-700">Возрастная группа</span>
+                      <select className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2" value={editingModuleForm.age_group} onChange={(event) => setEditingModuleForm({ ...editingModuleForm, age_group: event.target.value })}>
+                        <option value="junior">{AGE_GROUP_LABELS.junior}</option>
+                        <option value="middle">{AGE_GROUP_LABELS.middle}</option>
+                        <option value="senior">{AGE_GROUP_LABELS.senior}</option>
+                      </select>
+                    </label>
+                    <label className="space-y-2 sm:col-span-2">
+                      <span className="text-sm font-semibold text-slate-700">Описание</span>
+                      <textarea className="min-h-24 w-full rounded-xl border border-slate-200 bg-white px-3 py-2" required value={editingModuleForm.description} onChange={(event) => setEditingModuleForm({ ...editingModuleForm, description: event.target.value })} />
+                    </label>
+                    <div className="flex flex-wrap gap-2 sm:col-span-2">
+                      <button className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white" disabled={busyModuleId === module.id}>{busyModuleId === module.id ? 'Сохраняем…' : 'Сохранить'}</button>
+                      <button type="button" className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700" onClick={() => setEditingModule(null)}>Отмена</button>
+                    </div>
+                  </form>
+                ) : null}
               </article>
             ))}
           </div>
@@ -1298,6 +1354,7 @@ export function AdminModulesPanel({
               </p>
             </div>
           ) : null}
+          <FiveItemPager window={modulesWindow} loading={loading} itemLabel='модулей' className='mt-6 border-t border-slate-200 pt-4' />
         </section>
       </div>
     </div>
@@ -1305,22 +1362,25 @@ export function AdminModulesPanel({
 }
 
 export function AdminLessonsPanel({
-  initialModules,
+  initialData,
   moduleHubHref,
+  lessonBaseHref,
 }: {
-  initialModules: ModuleItem[] | null
+  initialData: AdminModulesResponse | null
   moduleHubHref: string
+  lessonBaseHref: string
 }) {
-  const [modules, setModules] = useState<ModuleItem[]>(initialModules ?? [])
-  const [loading, setLoading] = useState(!initialModules)
+  const [response, setResponse] = useState<AdminModulesResponse | null>(initialData)
+  const [page, setPage] = useState(initialData?.pagination.page ?? 1)
+  const [loading, setLoading] = useState(!initialData)
 
-  const roadmapModules = modules.filter((module) => !module.is_custom_classroom_module)
+  const roadmapModules = (response?.modules ?? []).filter((module) => !module.is_custom_classroom_module)
 
-  async function loadModules() {
+  async function loadModules(nextPage = page) {
     setLoading(true)
     try {
-      const data = await api<{ modules: ModuleItem[] }>('/admin/modules', undefined, 'required')
-      setModules(data.modules)
+      const data = await api<AdminModulesResponse>(`/admin/modules?page=${nextPage}&page_size=${DIRECTORY_PAGE_SIZE}`, undefined, 'required')
+      setResponse(data)
     } catch (error) {
       showErrorToast(describeError(error, 'Не удалось загрузить модули для конструктора уроков.'))
     } finally {
@@ -1329,9 +1389,10 @@ export function AdminLessonsPanel({
   }
 
   useEffect(() => {
-    if (initialModules) return
-    void loadModules()
-  }, [initialModules])
+    if (initialData && page === initialData.pagination.page) return
+    void loadModules(page)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialData, page])
 
   return (
     <div className="space-y-6">
@@ -1348,6 +1409,11 @@ export function AdminLessonsPanel({
             <span className="brand-chip brand-chip--soft">
               {loading ? 'Загрузка…' : `${roadmapModules.length} доступных модулей`}
             </span>
+            {roadmapModules.length > 0 ? (
+              <Link href="#lesson-constructor" className="brand-button-primary min-h-[2.8rem] px-4 py-2 text-sm">
+                Создать урок
+              </Link>
+            ) : null}
             <Link href={moduleHubHref} className="brand-button-ghost min-h-[2.8rem] px-4 py-2 text-sm">
               Перейти к модулям
             </Link>
@@ -1355,8 +1421,18 @@ export function AdminLessonsPanel({
         </div>
       </section>
 
+      <AdminLessonLifecycleLists editBaseHref={lessonBaseHref} />
+
       {roadmapModules.length > 0 ? (
-        <AdminLessonBuilder modules={roadmapModules} onReload={loadModules} />
+        <div id="lesson-constructor" className="scroll-mt-24">
+          <AdminLessonBuilder
+            modules={roadmapModules}
+            modulesPagination={response?.pagination}
+            modulesLoading={loading}
+            onModulesPageChange={setPage}
+            onReload={() => loadModules(page)}
+          />
+        </div>
       ) : (
         <section className="codequest-card p-8 text-center">
           <p className="text-lg font-black text-slate-900">Сначала подготовьте хотя бы один модуль</p>
@@ -1433,6 +1509,20 @@ export function AdminAuditLogPanel({
   const [sitePage, setSitePage] = useState(1)
   const [siteLoading, setSiteLoading] = useState(false)
   const siteSkipDebounce = useRef(false)
+  const auditWindow = useFiveItemWindow({
+    items: response?.audit_logs ?? [],
+    pagination: response?.pagination,
+    loading,
+    onPageChange: setPage,
+    resetKey: `${action}|${actorRole}|${actorLogin}|${target}|${auditSort}|${auditOrder}`,
+  })
+  const siteWindow = useFiveItemWindow({
+    items: siteResponse?.site_activity_logs ?? [],
+    pagination: siteResponse?.pagination,
+    loading: siteLoading,
+    onPageChange: setSitePage,
+    resetKey: `${siteUser}|${siteMethod}|${sitePath}|${siteStatus}|${siteRole}|${siteIp}|${siteSort}|${siteOrder}`,
+  })
 
   useEffect(() => {
     let cancelled = false
@@ -2142,7 +2232,7 @@ export function AdminAuditLogPanel({
       {logTab === 'admin' ? (
         <section className="codequest-card p-6 sm:p-7">
           <div className="space-y-4">
-            {(response?.audit_logs ?? []).map((log) => (
+            {auditWindow.visibleItems.map((log) => (
               <details
                 key={log.id}
                 className="admin-log-entry rounded-[1.75rem] border border-slate-200 bg-white/85 p-5"
@@ -2191,16 +2281,12 @@ export function AdminAuditLogPanel({
             </div>
           ) : null}
 
-          <PaginationControls
-            pagination={response?.pagination}
-            loading={loading}
-            onPageChange={(nextPage) => setPage(nextPage)}
-          />
+          <FiveItemPager window={auditWindow} loading={loading} itemLabel='записей журнала' className='mt-6 border-t border-slate-200 pt-4' />
         </section>
       ) : (
         <section className="codequest-card p-6 sm:p-7">
           <div className="space-y-3">
-            {(siteResponse?.site_activity_logs ?? []).map((log) => (
+            {siteWindow.visibleItems.map((log) => (
               <div
                 key={log.id}
                 className="rounded-[1.75rem] border border-slate-200 bg-white/85 p-4 sm:p-5"
@@ -2229,11 +2315,7 @@ export function AdminAuditLogPanel({
               <p className="mt-3 text-sm leading-7 text-slate-500">Поменяйте фильтры или выполните действия в приложении.</p>
             </div>
           ) : null}
-          <PaginationControls
-            pagination={siteResponse?.pagination}
-            loading={siteLoading}
-            onPageChange={(nextPage) => setSitePage(nextPage)}
-          />
+          <FiveItemPager window={siteWindow} loading={siteLoading} itemLabel='записей журнала' className='mt-6 border-t border-slate-200 pt-4' />
         </section>
       )}
     </div>

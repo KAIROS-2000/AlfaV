@@ -3,6 +3,7 @@ from __future__ import annotations
 from flask import Blueprint, request
 
 from ..core.db import db
+from ..core.pagination import pagination_params
 from ..core.security import auth_required
 from ..models.staff_messaging import StaffDirectMessage
 from ..models.user import User, UserRole
@@ -45,15 +46,33 @@ def _message_dict(message: StaffDirectMessage, current: User) -> dict:
 @staff_messaging_bp.get("/summary")
 @auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
 def staff_summary(user: User):
-    return sm.staff_inbox_summary(user)
+    page, page_size = pagination_params(request.args)
+    teachers_page, _ = pagination_params(request.args, page_key='teachers_page')
+    staff_page, _ = pagination_params(request.args, page_key='staff_page')
+    return sm.staff_inbox_summary(
+        user,
+        page=page,
+        page_size=page_size,
+        teachers_page=teachers_page,
+        staff_page=staff_page,
+    )
 
 
 @staff_messaging_bp.get("/search-users")
 @auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
 def search_users(user: User):
     q = str(request.args.get("q") or "")
-    found = sm.search_users_by_login(user, q)
-    return {"users": [sm._user_payload(u) for u in found]}
+    page, page_size = pagination_params(request.args)
+    found, pagination = sm.search_users_by_login(
+        user,
+        q,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "users": [sm._user_payload(u) for u in found],
+        "pagination": pagination,
+    }
 
 
 @staff_messaging_bp.post("/threads")

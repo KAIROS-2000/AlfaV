@@ -5,8 +5,16 @@ from uuid import uuid4
 
 from flask import Blueprint, current_app, request, send_file
 from sqlalchemy import case, func, or_
+from sqlalchemy.orm.exc import StaleDataError
 
 from ..core.db import db
+from ..core.pagination import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    paginate_query,
+    pagination_params,
+    pagination_payload,
+)
 from .lesson_builder import build_lesson_quiz
 from ..core.security import (
     ADMIN_PASSWORD_MIN_LENGTH,
@@ -33,7 +41,10 @@ from ..models.learning import (
     custom_classroom_module_slug_prefix,
     decode_assignment_description,
     has_explicit_code_task_intent,
+    lesson_publish_readiness_errors,
     normalize_task_validation,
+    normalize_authoring_metadata,
+    clone_lesson_content,
 )
 from ..models.messaging import Conversation, ConversationReadState, Message
 from ..models.parent_cabinet import (
@@ -64,8 +75,8 @@ from ..services.teacher_approval_service import cleanup_expired_teacher_requests
 
 
 admin_bp = Blueprint('admin', __name__)
-DEFAULT_DIRECTORY_PAGE_SIZE = 20
-MAX_DIRECTORY_PAGE_SIZE = 100
+DEFAULT_DIRECTORY_PAGE_SIZE = DEFAULT_PAGE_SIZE
+MAX_DIRECTORY_PAGE_SIZE = MAX_PAGE_SIZE
 VISIBLE_USER_ROLES = (UserRole.STUDENT, UserRole.TEACHER)
 MANAGED_ADMIN_ROLES = (UserRole.ADMIN,)
 MANAGED_MANAGER_ROLES = (UserRole.MANAGER,)
@@ -74,6 +85,7 @@ CONTACT_ROLE_VALUES = {role.value for role in BROADCAST_RECIPIENT_ROLES}
 STAFF_BROADCAST_ROLES = (UserRole.MANAGER, UserRole.SUPERADMIN)
 VALID_STATUS_FILTERS = {'all', 'active', 'blocked'}
 VALID_TEACHER_REQUEST_FILTERS = {'all', *TEACHER_APPROVAL_STATUSES}
+VALID_LESSON_LIST_STATUSES = {'all', 'draft', 'published', 'archived'}
 
 
 def _safe_int(value, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
@@ -86,6 +98,72 @@ def _safe_int(value, default: int, minimum: int | None = None, maximum: int | No
     if maximum is not None:
         parsed = min(parsed, maximum)
     return parsed
+
+
+def _is_draft_save(data: dict) -> bool:
+    """Only the JSON boolean enables the intentionally lax draft-save path."""
+    return data.get('save_draft') is True
+
+
+def _draft_payload_from_request(data: dict) -> dict:
+    raw_payload = data.get('draft_payload')
+    if isinstance(raw_payload, dict):
+        return raw_payload
+    return {
+        key: data[key]
+        for key in (
+            'title', 'summary', 'age_group', 'content_format', 'duration_minutes',
+            'passing_score', 'theory_text', 'key_points', 'interactive_steps',
+            'task', 'quiz',
+        )
+        if key in data
+    }
+
+
+def _is_complete_builder_payload(data: dict) -> bool:
+    return all(
+        field in data
+        for field in (
+            'title', 'summary', 'content_format', 'duration_minutes',
+            'passing_score', 'theory_text', 'key_points', 'interactive_steps',
+            'task', 'quiz',
+        )
+    )
+
+
+def _authoring_metadata_for_write(lesson: Lesson, data: dict) -> dict:
+    metadata = normalize_authoring_metadata(lesson.authoring_metadata)
+    if isinstance(data.get('authoring_metadata'), dict):
+        metadata = normalize_authoring_metadata(data['authoring_metadata'])
+    if 'format_note' in data:
+        metadata['format_note'] = str(data.get('format_note') or '').strip()
+    if _is_draft_save(data):
+        if 'draft_payload' in data and not isinstance(data.get('draft_payload'), dict):
+            raise ValueError('Черновик должен содержать JSON-объект размером не более 64 КБ.')
+        metadata['draft_payload'] = _draft_payload_from_request(data)
+    elif _is_complete_builder_payload(data):
+        metadata.pop('draft_payload', None)
+
+    normalized = normalize_authoring_metadata(metadata)
+    if _is_draft_save(data) and 'draft_payload' not in normalized:
+        raise ValueError('Черновик должен содержать JSON-объект размером не более 64 КБ.')
+    return normalized
+
+
+def _lesson_list_status_from_request() -> str | None:
+    raw_status = request.args.get('status')
+    status = 'all' if raw_status is None else raw_status.strip().lower()
+    return status if status in VALID_LESSON_LIST_STATUSES else None
+
+
+def _filter_lessons_by_status(query, status: str):
+    if status == 'draft':
+        return query.filter(Lesson.is_published.is_(False), Lesson.archived_at.is_(None))
+    if status == 'published':
+        return query.filter(Lesson.is_published.is_(True), Lesson.archived_at.is_(None))
+    if status == 'archived':
+        return query.filter(Lesson.archived_at.is_not(None))
+    return query
 
 
 def _string_list(value) -> list[str]:
@@ -117,7 +195,14 @@ def _normalized_test_cases(value) -> list[dict]:
         label = str(item.get('label') or f'Тест {index}').strip() or f'Тест {index}'
         if not test_input and not expected:
             continue
-        rows.append({'label': label, 'input': test_input, 'expected': expected})
+        rows.append(
+            {
+                'label': label,
+                'input': test_input,
+                'expected': expected,
+                'is_public': item.get('is_public', False),
+            }
+        )
     return rows
 
 
@@ -157,13 +242,7 @@ def _normalize_teacher_request_filter(value: str | None) -> str:
 
 
 def _pagination_payload(total: int, page: int, page_size: int) -> dict:
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    return {
-        'page': page,
-        'page_size': page_size,
-        'total': total,
-        'total_pages': total_pages,
-    }
+    return pagination_payload(total, page, page_size)
 
 
 def _serialize_admin_user(user: User) -> dict:
@@ -985,7 +1064,7 @@ def teacher_requests(current_user: User):
 def approve_teacher_request(current_user: User, user_id: int):
     if cleanup_expired_teacher_requests():
         db.session.commit()
-    user = User.query.get_or_404(user_id)
+    user = db.get_or_404(User, user_id)
     error = _ensure_teacher_request_target(user)
     if error:
         return error
@@ -1020,12 +1099,84 @@ def approve_teacher_request(current_user: User, user_id: int):
     return {'teacher_request': _serialize_admin_user(user)}
 
 
+def _apply_lesson_authoring_changes(lesson: Lesson, data: dict) -> None:
+    """Apply the lesson-builder payload to an existing lesson.
+
+    This intentionally keeps the existing builder contract (theory_text,
+    key_points, task and quiz) so create and autosave cannot drift apart.
+    """
+    for field in ('title', 'summary', 'content_format'):
+        if field in data:
+            value = str(data.get(field) or '').strip()
+            if value:
+                setattr(lesson, field, value)
+    for field, minimum, maximum in (
+        ('duration_minutes', 5, 180),
+        ('passing_score', 0, 100),
+        ('order_index', 1, 1000000),
+    ):
+        if field in data:
+            setattr(lesson, field, _safe_int(data[field], getattr(lesson, field), minimum=minimum, maximum=maximum))
+
+    if 'theory_blocks' in data and isinstance(data['theory_blocks'], list):
+        lesson.theory_blocks = data['theory_blocks']
+    elif any(field in data for field in ('theory_text', 'key_points')):
+        lesson.theory_blocks = _build_theory_blocks(
+            lesson.title,
+            lesson.summary,
+            str(data.get('theory_text') or '').strip(),
+            _string_list(data.get('key_points')),
+        )
+    if 'interactive_steps' in data:
+        raw_steps = data['interactive_steps']
+        lesson.interactive_steps = (
+            raw_steps if isinstance(raw_steps, list) and all(isinstance(item, dict) for item in raw_steps)
+            else _build_interactive_steps(raw_steps)
+        )
+
+    lesson.authoring_metadata = _authoring_metadata_for_write(lesson, data)
+
+    if not _is_draft_save(data) and 'task' in data:
+        task = _build_task(lesson, data.get('task'), lesson.title)
+        lesson.tasks.clear()
+        if task is not None:
+            lesson.tasks.append(task)
+    if not _is_draft_save(data) and 'quiz' in data:
+        quiz = build_lesson_quiz(lesson, data.get('quiz'), lesson.title, question_prefix='admin-q')
+        lesson.quizzes.clear()
+        if quiz is not None:
+            lesson.quizzes.append(quiz)
+
+
+def _check_lesson_version(lesson: Lesson, data: dict):
+    try:
+        expected = int(data.get('version'))
+    except (TypeError, ValueError):
+        return {'message': 'Укажите актуальную версию урока.', 'lesson': lesson.to_authoring_dict()}, 400
+    if expected != lesson.version:
+        return {'message': 'Урок уже изменён в другой вкладке.', 'lesson': lesson.to_authoring_dict()}, 409
+    return None
+
+
+def _check_optional_lesson_version(lesson: Lesson, data: dict):
+    return _check_lesson_version(lesson, data) if 'version' in data else None
+
+
+def _stale_lesson_write_response(lesson_id: int):
+    db.session.rollback()
+    current_lesson = db.session.get(Lesson, lesson_id)
+    return {
+        'message': 'Урок уже изменён в другой вкладке.',
+        'lesson': current_lesson.to_authoring_dict() if current_lesson else None,
+    }, 409
+
+
 @admin_bp.patch('/teacher-requests/<int:user_id>/reject')
 @auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
 def reject_teacher_request(current_user: User, user_id: int):
     if cleanup_expired_teacher_requests():
         db.session.commit()
-    user = User.query.get_or_404(user_id)
+    user = db.get_or_404(User, user_id)
     error = _ensure_teacher_request_target(user)
     if error:
         return error
@@ -1068,7 +1219,7 @@ def reject_teacher_request(current_user: User, user_id: int):
 def block_user(current_user: User, user_id: int):
     if user_id == current_user.id:
         return {'message': 'Нельзя заблокировать самого себя.'}, 400
-    user = User.query.get_or_404(user_id)
+    user = db.get_or_404(User, user_id)
     error = _ensure_managed_user_target(user)
     if error:
         return error
@@ -1096,7 +1247,7 @@ def block_user(current_user: User, user_id: int):
 @admin_bp.patch('/users/<int:user_id>/unblock')
 @auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
 def unblock_user(current_user: User, user_id: int):
-    user = User.query.get_or_404(user_id)
+    user = db.get_or_404(User, user_id)
     error = _ensure_managed_user_target(user)
     if error:
         return error
@@ -1123,7 +1274,7 @@ def unblock_user(current_user: User, user_id: int):
 def delete_user(current_user: User, user_id: int):
     if user_id == current_user.id:
         return {'message': 'Нельзя удалить собственную учётную запись через этот раздел.'}, 400
-    user = User.query.get_or_404(user_id)
+    user = db.get_or_404(User, user_id)
     error = _ensure_managed_user_target(user)
     if error:
         return error
@@ -1263,11 +1414,76 @@ def create_broadcast(current_user: User):
     }, 201
 
 
+@admin_bp.get('/lessons')
+@auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
+def list_admin_lessons(current_user: User):
+    status = _lesson_list_status_from_request()
+    if status is None:
+        return {
+            'message': 'Некорректный статус урока.',
+            'allowed_statuses': sorted(VALID_LESSON_LIST_STATUSES),
+        }, 400
+
+    page, page_size = pagination_params(request.args)
+    query = _filter_lessons_by_status(
+        Lesson.query.join(Module).filter(
+            Module.slug.notlike(f'{CUSTOM_CLASSROOM_MODULE_PREFIX}%')
+        ),
+        status,
+    ).order_by(Lesson.updated_at.desc(), Lesson.id.desc())
+    lessons, pagination = paginate_query(query, page=page, page_size=page_size)
+    return {
+        'lessons': [lesson.to_authoring_summary_dict() for lesson in lessons],
+        'pagination': pagination,
+    }
+
+
 @admin_bp.get('/modules')
 @auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
 def list_modules(current_user: User):
-    modules = Module.query.order_by(Module.order_index.asc()).all()
-    return {'modules': [module.to_dict(include_lessons=True) for module in modules]}
+    scope = (request.args.get('scope') or 'roadmap').strip().lower()
+    if scope not in {'roadmap', 'custom', 'all'}:
+        return {
+            'message': 'Некорректная область списка модулей.',
+            'allowed_scopes': ['roadmap', 'custom', 'all'],
+        }, 400
+
+    page, page_size = pagination_params(request.args)
+    query = Module.query
+    if scope == 'roadmap':
+        query = query.filter(Module.slug.notlike(f'{CUSTOM_CLASSROOM_MODULE_PREFIX}%'))
+    elif scope == 'custom':
+        query = query.filter(Module.slug.like(f'{CUSTOM_CLASSROOM_MODULE_PREFIX}%'))
+    query = query.order_by(Module.order_index.asc(), Module.id.asc())
+    modules, pagination = paginate_query(query, page=page, page_size=page_size)
+    published_total = query.filter(Module.is_published.is_(True)).order_by(None).count()
+    module_ids = [module.id for module in modules]
+    lesson_counts = {
+        module_id: count
+        for module_id, count in (
+            db.session.query(Lesson.module_id, func.count(Lesson.id))
+            .filter(Lesson.module_id.in_(module_ids))
+            .group_by(Lesson.module_id)
+            .all()
+            if module_ids
+            else []
+        )
+    }
+    return {
+        'modules': [
+            {
+                **module.to_dict(),
+                'lessons_count': int(lesson_counts.get(module.id, 0)),
+            }
+            for module in modules
+        ],
+        'pagination': pagination,
+        'stats': {
+            'total': pagination['total'],
+            'published': published_total,
+        },
+        'scope': scope,
+    }
 
 
 @admin_bp.post('/modules')
@@ -1305,7 +1521,7 @@ def create_module(current_user: User):
 @admin_bp.patch('/modules/<int:module_id>')
 @auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
 def update_module(current_user: User, module_id: int):
-    module = Module.query.get_or_404(module_id)
+    module = db.get_or_404(Module, module_id)
     data = request.get_json() or {}
     was_published = bool(module.is_published)
     for field in ['title', 'description', 'age_group', 'icon', 'color']:
@@ -1335,7 +1551,7 @@ def update_module(current_user: User, module_id: int):
 @admin_bp.delete('/modules/<int:module_id>')
 @auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
 def delete_module(current_user: User, module_id: int):
-    module = Module.query.get_or_404(module_id)
+    module = db.get_or_404(Module, module_id)
     if module.is_custom_classroom_module:
         return {'message': 'Модули учительских классов удаляются из кабинета учителя, а не из roadmap-админки.'}, 400
     if module.is_published:
@@ -1368,66 +1584,60 @@ def delete_module(current_user: User, module_id: int):
 @admin_bp.post('/modules/<int:module_id>/lessons')
 @auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
 def create_module_lesson(current_user: User, module_id: int):
-    module = Module.query.get_or_404(module_id)
+    module = db.get_or_404(Module, module_id)
     if module.is_custom_classroom_module:
         return {'message': 'Через админку можно добавлять уроки только в общие roadmap-модули.'}, 400
 
     data = request.get_json() or {}
+    save_draft = _is_draft_save(data)
     title = str(data.get('title') or '').strip()
     summary = str(data.get('summary') or '').strip()
-    if not title or not summary:
+    if not save_draft and (not title or not summary):
         return {'message': 'Укажите название и краткое описание урока.'}, 400
+    title = title or 'Черновик урока'
+    summary = summary or 'Черновик урока. Заполните описание перед публикацией.'
 
     theory_text = str(data.get('theory_text') or '').strip()
     key_points = _string_list(data.get('key_points'))
     interactive_steps = _build_interactive_steps(data.get('interactive_steps'))
     order_index = _insert_position(module, data.get('insert_position'))
-    module_was_hidden = not module.is_published
-
-    if bool(data.get('publish_module_if_needed')) and module_was_hidden:
-        module.is_published = True
-
     lesson = Lesson(
         module_id=module.id,
         slug=_generate_module_lesson_slug(module),
         title=title,
         summary=summary,
-        content_format='mixed',
+        content_format=str(data.get('content_format') or 'mixed').strip() or 'mixed',
         theory_blocks=_build_theory_blocks(title, summary, theory_text, key_points),
         interactive_steps=interactive_steps,
         order_index=order_index,
         duration_minutes=_safe_int(data.get('duration_minutes'), 10, minimum=5, maximum=180),
         passing_score=_safe_int(data.get('passing_score'), 70, minimum=0, maximum=100),
-        is_published=True,
+        is_published=False,
+        created_by_id=current_user.id,
+        authoring_metadata={},
     )
     db.session.add(lesson)
     db.session.flush()
 
     try:
-        task = _build_task(lesson, data.get('task'), title)
-        if task is not None:
-            db.session.add(task)
-        quiz = build_lesson_quiz(lesson, data.get('quiz'), title, question_prefix='admin-q')
-        if quiz is not None:
-            db.session.add(quiz)
+        lesson.authoring_metadata = _authoring_metadata_for_write(lesson, data)
+        if not save_draft:
+            task = _build_task(lesson, data.get('task'), title)
+            if task is not None:
+                db.session.add(task)
+            quiz = build_lesson_quiz(lesson, data.get('quiz'), title, question_prefix='admin-q')
+            if quiz is not None:
+                db.session.add(quiz)
+            readiness_errors = lesson_publish_readiness_errors(lesson)
+            if readiness_errors:
+                db.session.rollback()
+                return {
+                    'message': 'Урок нельзя сохранить без обязательного содержания.',
+                    'errors': readiness_errors,
+                }, 400
     except ValueError as exc:
         db.session.rollback()
         return {'message': str(exc)}, 400
-
-    if module_was_hidden and module.is_published:
-        _log_admin_action(
-            current_user,
-            action='module_published',
-            entity_type='module',
-            entity_id=module.id,
-            entity_label=module.title,
-            details={
-                'module_slug': module.slug,
-                'previous_state': 'hidden',
-                'next_state': 'published',
-                'reason': 'publish_module_if_needed',
-            },
-        )
 
     _log_admin_action(
         current_user,
@@ -1439,15 +1649,172 @@ def create_module_lesson(current_user: User, module_id: int):
             'module_id': module.id,
             'module_title': module.title,
             'module_slug': module.slug,
-            'publish_module_if_needed': bool(data.get('publish_module_if_needed')),
+            'status': 'draft',
         },
     )
     db.session.commit()
     return {
-        'lesson': lesson.to_dict(include_private=True),
-        'roadmap_visible': bool(module.is_published and lesson.is_published),
+        'lesson': lesson.to_authoring_dict(),
+        'roadmap_visible': False,
         'module': module.to_dict(include_lessons=True),
     }, 201
+
+
+@admin_bp.get('/lessons/<int:lesson_id>')
+@auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
+def get_admin_lesson(current_user: User, lesson_id: int):
+    lesson = db.get_or_404(Lesson, lesson_id)
+    if lesson.module.is_custom_classroom_module:
+        return {'message': 'Авторские уроки классов доступны только их учителю.'}, 403
+    return {'lesson': lesson.to_authoring_dict()}
+
+
+@admin_bp.patch('/lessons/<int:lesson_id>')
+@auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
+def update_admin_lesson(current_user: User, lesson_id: int):
+    lesson = db.get_or_404(Lesson, lesson_id)
+    if lesson.module.is_custom_classroom_module:
+        return {'message': 'Авторские уроки классов доступны только их учителю.'}, 403
+    data = request.get_json() or {}
+    conflict = _check_lesson_version(lesson, data)
+    if conflict:
+        return conflict
+    if _is_draft_save(data) and lesson.is_published and lesson.archived_at is None:
+        return {
+            'message': 'Нельзя сохранять неполный черновик поверх опубликованного урока. Сначала снимите урок с публикации.'
+        }, 409
+    try:
+        _apply_lesson_authoring_changes(lesson, data)
+    except ValueError as exc:
+        db.session.rollback()
+        return {'message': str(exc)}, 400
+    if lesson.is_published or _is_complete_builder_payload(data):
+        readiness_errors = lesson_publish_readiness_errors(lesson)
+        if readiness_errors:
+            db.session.rollback()
+            return {
+                'message': 'Урок нельзя сохранить в таком состоянии.',
+                'errors': readiness_errors,
+            }, 400
+    lesson.version += 1
+    _log_admin_action(current_user, action='lesson_updated', entity_type='lesson', entity_id=lesson.id, entity_label=lesson.title, details={'version': lesson.version})
+    try:
+        db.session.commit()
+    except StaleDataError:
+        return _stale_lesson_write_response(lesson_id)
+    return {'lesson': lesson.to_authoring_dict()}
+
+
+@admin_bp.post('/lessons/<int:lesson_id>/publish')
+@auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
+def publish_admin_lesson(current_user: User, lesson_id: int):
+    lesson = db.get_or_404(Lesson, lesson_id)
+    if lesson.module.is_custom_classroom_module:
+        return {'message': 'Авторские уроки классов доступны только их учителю.'}, 403
+    data = request.get_json(silent=True) or {}
+    conflict = _check_optional_lesson_version(lesson, data)
+    if conflict:
+        return conflict
+    readiness_errors = lesson_publish_readiness_errors(lesson)
+    if readiness_errors:
+        return {
+            'message': 'Урок пока нельзя опубликовать.',
+            'errors': readiness_errors,
+        }, 400
+    lesson.is_published = True
+    lesson.archived_at = None
+    lesson.published_at = lesson.published_at or datetime.now(UTC)
+    lesson.version += 1
+    _log_admin_action(current_user, action='lesson_published', entity_type='lesson', entity_id=lesson.id, entity_label=lesson.title, details={'module_id': lesson.module_id})
+    try:
+        db.session.commit()
+    except StaleDataError:
+        return _stale_lesson_write_response(lesson_id)
+    return {'lesson': lesson.to_authoring_dict(), 'roadmap_visible': bool(lesson.module.is_published)}
+
+
+@admin_bp.post('/lessons/<int:lesson_id>/archive')
+@auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
+def archive_admin_lesson(current_user: User, lesson_id: int):
+    lesson = db.get_or_404(Lesson, lesson_id)
+    if lesson.module.is_custom_classroom_module:
+        return {'message': 'Авторские уроки классов доступны только их учителю.'}, 403
+    data = request.get_json(silent=True) or {}
+    conflict = _check_optional_lesson_version(lesson, data)
+    if conflict:
+        return conflict
+    assignment_count = Assignment.query.filter_by(lesson_id=lesson.id).count()
+    progress_count = UserProgress.query.filter_by(lesson_id=lesson.id).count()
+    if assignment_count or progress_count:
+        dependencies = {
+            'assignments': assignment_count,
+            'progress_records': progress_count,
+        }
+        return {
+            'message': 'Нельзя архивировать урок: он используется в заданиях или имеет сохранённый прогресс учеников.',
+            'dependencies': dependencies,
+        }, 409
+    lesson.is_published = False
+    lesson.archived_at = datetime.now(UTC)
+    lesson.version += 1
+    _log_admin_action(current_user, action='lesson_archived', entity_type='lesson', entity_id=lesson.id, entity_label=lesson.title, details={'module_id': lesson.module_id})
+    try:
+        db.session.commit()
+    except StaleDataError:
+        return _stale_lesson_write_response(lesson_id)
+    return {'lesson': lesson.to_authoring_dict()}
+
+
+@admin_bp.post('/lessons/<int:lesson_id>/duplicate')
+@auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
+def duplicate_admin_lesson(current_user: User, lesson_id: int):
+    source = db.get_or_404(Lesson, lesson_id)
+    if source.module.is_custom_classroom_module:
+        return {'message': 'Авторские уроки классов доступны только их учителю.'}, 403
+    order_index = _insert_position(
+        source.module,
+        (request.get_json(silent=True) or {}).get('insert_position'),
+    )
+    clone = Lesson(
+        module_id=source.module_id,
+        slug=_generate_module_lesson_slug(source.module),
+        title=f'Копия: {source.title}',
+        summary=source.summary,
+        order_index=order_index,
+        is_published=False,
+        created_by_id=current_user.id,
+    )
+    clone_lesson_content(source, clone)
+    db.session.add(clone)
+    db.session.flush()
+    _log_admin_action(current_user, action='lesson_duplicated', entity_type='lesson', entity_id=clone.id, entity_label=clone.title, details={'source_lesson_id': source.id})
+    db.session.commit()
+    return {'lesson': clone.to_authoring_dict()}, 201
+
+
+@admin_bp.patch('/modules/<int:module_id>/lessons/reorder')
+@auth_required([UserRole.ADMIN, UserRole.SUPERADMIN])
+def reorder_module_lessons(current_user: User, module_id: int):
+    module = db.get_or_404(Module, module_id)
+    if module.is_custom_classroom_module:
+        return {'message': 'Порядок авторских уроков меняет их учитель.'}, 403
+    lesson_ids = (request.get_json() or {}).get('lesson_ids')
+    if not isinstance(lesson_ids, list):
+        return {'message': 'Передайте полный список lesson_ids.'}, 400
+    lessons = {lesson.id: lesson for lesson in module.lessons}
+    if set(lesson_ids) != set(lessons) or len(lesson_ids) != len(lessons):
+        return {'message': 'Список lesson_ids должен содержать все уроки модуля по одному разу.'}, 400
+    for index, lesson_id in enumerate(lesson_ids, start=1):
+        lesson = lessons[lesson_id]
+        if lesson.order_index != index:
+            lesson.order_index = index
+            lesson.version += 1
+    try:
+        db.session.commit()
+    except StaleDataError:
+        db.session.rollback()
+        return {'message': 'Порядок уроков уже изменён в другой вкладке.'}, 409
+    return {'module': module.to_dict(include_lessons=True)}
 
 
 @admin_bp.post('/admins')
@@ -1546,7 +1913,7 @@ def _ensure_manager_target(user: User):
 def block_manager(current_user: User, user_id: int):
     if user_id == current_user.id:
         return {'message': 'Нельзя заблокировать самого себя.'}, 400
-    user = User.query.get_or_404(user_id)
+    user = db.get_or_404(User, user_id)
     error = _ensure_manager_target(user)
     if error:
         return error
@@ -1562,7 +1929,7 @@ def block_manager(current_user: User, user_id: int):
 @admin_bp.patch('/managers/<int:user_id>/unblock')
 @auth_required([UserRole.SUPERADMIN])
 def unblock_manager(current_user: User, user_id: int):
-    user = User.query.get_or_404(user_id)
+    user = db.get_or_404(User, user_id)
     error = _ensure_manager_target(user)
     if error:
         return error
@@ -1575,7 +1942,7 @@ def unblock_manager(current_user: User, user_id: int):
 @admin_bp.delete('/managers/<int:user_id>')
 @auth_required([UserRole.SUPERADMIN])
 def delete_manager(current_user: User, user_id: int):
-    user = User.query.get_or_404(user_id)
+    user = db.get_or_404(User, user_id)
     error = _ensure_manager_target(user)
     if error:
         return error
@@ -1592,7 +1959,7 @@ def delete_manager(current_user: User, user_id: int):
 def block_admin(current_user: User, user_id: int):
     if user_id == current_user.id:
         return {'message': 'Нельзя заблокировать самого себя.'}, 400
-    user = User.query.get_or_404(user_id)
+    user = db.get_or_404(User, user_id)
     error = _ensure_admin_target(user)
     if error:
         return error
@@ -1620,7 +1987,7 @@ def block_admin(current_user: User, user_id: int):
 @admin_bp.patch('/admins/<int:user_id>/unblock')
 @auth_required([UserRole.SUPERADMIN])
 def unblock_admin(current_user: User, user_id: int):
-    user = User.query.get_or_404(user_id)
+    user = db.get_or_404(User, user_id)
     error = _ensure_admin_target(user)
     if error:
         return error
@@ -1647,7 +2014,7 @@ def unblock_admin(current_user: User, user_id: int):
 def delete_admin(current_user: User, user_id: int):
     if user_id == current_user.id:
         return {'message': 'Нельзя удалить собственную учётную запись.'}, 400
-    user = User.query.get_or_404(user_id)
+    user = db.get_or_404(User, user_id)
     error = _ensure_admin_target(user)
     if error:
         return error
@@ -1770,7 +2137,7 @@ def attach_assignment_image(current_user: User, assignment_id: int):
     """Attach an existing MediaAsset to an Assignment, or detach if image_id is null."""
     from ..models.media import MEDIA_KIND_ASSIGNMENT_COVER, MediaAsset
 
-    assignment = Assignment.query.get_or_404(assignment_id)
+    assignment = db.get_or_404(Assignment, assignment_id)
     payload = request.get_json(silent=True) or {}
     image_id_raw = payload.get('image_id')
     if image_id_raw in (None, '', 0):
@@ -1791,7 +2158,7 @@ def attach_assignment_image(current_user: User, assignment_id: int):
         image_id = int(image_id_raw)
     except (TypeError, ValueError):
         return {'message': 'Некорректный image_id.'}, 400
-    media = MediaAsset.query.get(image_id)
+    media = db.session.get(MediaAsset, image_id)
     if media is None or media.kind != MEDIA_KIND_ASSIGNMENT_COVER:
         return {'message': 'Изображение не найдено.'}, 404
     assignment.image_id = media.id

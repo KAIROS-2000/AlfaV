@@ -1,6 +1,7 @@
 'use client'
 
 import { AdminAreaShell } from '@/components/admin-area-shell'
+import { FiveItemPager, SERVER_PAGE_SIZE, useFiveItemWindow } from '@/components/five-item-navigator'
 import { api, getApiErrorMessage } from '@/lib/api'
 import { showErrorToast, showSuccessToast } from '@/lib/toast'
 import type { BugHunterStaffListResponse, BugHunterStaffSettingsResponse } from '@/types'
@@ -26,6 +27,7 @@ export function AdminBugHunterPageView({ area }: { area: AdminArea }) {
 	const [xpMax, setXpMax] = useState(10_000)
 	const [xpSaving, setXpSaving] = useState(false)
 	const [xpLoading, setXpLoading] = useState(true)
+	const [page, setPage] = useState(1)
 
 	const loadSettings = useCallback(async () => {
 		setXpLoading(true)
@@ -48,9 +50,10 @@ export function AdminBugHunterPageView({ area }: { area: AdminArea }) {
 		setLoading(true)
 		setListError('')
 		try {
-			const qs = filter ? `?status=${encodeURIComponent(filter)}` : ''
+			const qs = new URLSearchParams({ page: String(page), page_size: String(SERVER_PAGE_SIZE) })
+			if (filter) qs.set('status', filter)
 			const res = await api<BugHunterStaffListResponse>(
-				`/support/staff/bug-reports${qs}`,
+				`/support/staff/bug-reports?${qs.toString()}`,
 				undefined,
 				'required',
 			)
@@ -63,7 +66,7 @@ export function AdminBugHunterPageView({ area }: { area: AdminArea }) {
 		} finally {
 			setLoading(false)
 		}
-	}, [filter])
+	}, [filter, page])
 
 	useEffect(() => {
 		void loadSettings()
@@ -117,7 +120,8 @@ export function AdminBugHunterPageView({ area }: { area: AdminArea }) {
 	}
 
 	const reports = payload?.reports ?? []
-	const count = reports.length
+	const reportsWindow = useFiveItemWindow({ items: reports, pagination: payload?.pagination, loading, onPageChange: setPage, resetKey: filter })
+	const count = payload?.pagination.total ?? reports.length
 
 	return (
 		<AdminAreaShell area={area} section='bug-hunter'>
@@ -158,7 +162,7 @@ export function AdminBugHunterPageView({ area }: { area: AdminArea }) {
 							<button
 								key={f.value || 'all'}
 								type='button'
-								onClick={() => setFilter(f.value)}
+								onClick={() => { setFilter(f.value); setPage(1) }}
 								className={`rounded-full px-3 py-1.5 text-xs font-black uppercase tracking-wide ring-1 ring-inset transition ${
 									filter === f.value
 										? 'bg-slate-900 text-white ring-slate-900'
@@ -191,7 +195,7 @@ export function AdminBugHunterPageView({ area }: { area: AdminArea }) {
 						</p>
 					) : null}
 
-					{reports.map((r) => (
+					{reportsWindow.visibleItems.map((r) => (
 						<div
 							key={r.id}
 							className='overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm'
@@ -280,6 +284,7 @@ export function AdminBugHunterPageView({ area }: { area: AdminArea }) {
 							</div>
 						</div>
 					))}
+					<FiveItemPager window={reportsWindow} loading={loading} itemLabel='заявок' />
 				</div>
 			</div>
 

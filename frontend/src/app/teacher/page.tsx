@@ -4,8 +4,8 @@ import { TeacherOverviewData } from '@/types'
 
 export default async function TeacherPage() {
 	const initialOverview = await serverApi<TeacherOverviewData>(
-		'/teacher/overview',
-	).catch(() => null)
+		'/teacher/overview?page=1&page_size=15',
+	)
 
 	return (
 		<main className='teacher-page'>

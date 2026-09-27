@@ -4,8 +4,8 @@ import type { UserItem } from '@/types'
 import { redirect } from 'next/navigation'
 
 export default async function AdminBugHunterPage() {
-	const session = await serverApi<{ user: UserItem }>('/auth/me').catch(() => null)
-	if (!session?.user) {
+	const session = await serverApi<{ user: UserItem }>('/auth/me')
+	if (!session.user) {
 		redirect('/auth/login')
 	}
 	if (session.user.role !== 'admin' && session.user.role !== 'superadmin') {

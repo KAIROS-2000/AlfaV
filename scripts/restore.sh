@@ -26,6 +26,11 @@ fi
 
 FILE="$1"
 
+if [ -z "${PGPASSWORD:-}" ] && [ -n "${PGPASSWORD_FILE:-}" ]; then
+    PGPASSWORD="$(tr -d '\r' < "${PGPASSWORD_FILE}")"
+    export PGPASSWORD
+fi
+
 if [ ! -f "${FILE}" ]; then
     echo "error: backup file not found: ${FILE}" >&2
     exit 1
@@ -54,12 +59,17 @@ fi
 
 echo "[$(date -u +%FT%TZ)] starting pg_restore"
 
-gunzip -c "${FILE}" | pg_restore \
+RAW="$(mktemp)"
+cleanup() { rm -f "${RAW}"; }
+trap cleanup EXIT INT TERM
+gunzip -c "${FILE}" > "${RAW}"
+pg_restore \
     --clean \
     --if-exists \
     --no-owner \
     --no-privileges \
     --exit-on-error \
-    --dbname="${PGDATABASE}"
+    --dbname="${PGDATABASE}" \
+    "${RAW}"
 
 echo "[$(date -u +%FT%TZ)] restore complete"

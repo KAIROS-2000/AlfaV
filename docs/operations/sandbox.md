@@ -38,43 +38,29 @@ enabling the profile on a new host.
    - `cpus: 1.0` → a single logical core per container.
    - `ulimits.nproc: 64`, `ulimits.nofile: 256/256` → per-process rlimits as
      a second line of defence behind `pids_limit`.
-9. **Network isolation (partial — see known limitation)**. The `judge_net`
-   bridge is declared with `internal: true`, which disables the default
-   gateway — so the judge-runner has **no Internet egress**. The judge-runner
-   is attached ONLY to `judge_net`; it has no route to `backend_net` and no
-   route to the host.
+9. **Network isolation through a one-purpose gateway.** Production Compose
+   uses two separate internal bridges. Backend connects to `judge_client_net`;
+   judge-runner connects to `judge_worker_net`; only `judge-gateway` is
+   dual-homed. The gateway exposes `/execute` and `/health`, is not a general
+   forward proxy, and has no route for arbitrary backend requests. Submitted
+   code therefore cannot resolve or connect directly to backend, PostgreSQL,
+   Redis, the host, or the Internet.
 
-   **Known limitation — lateral reach to backend on `judge_net`.** The backend
-   service is also attached to `judge_net` (it must, to call the runner's
-   HTTP `/execute` endpoint). Docker bridge networks are bidirectional, so
-   compromised submitted code CAN initiate HTTP connections back to
-   `backend:8000` over `judge_net`. Compensating controls that make this
-   largely inert today:
+   Before binding its HTTP socket, the runner self-execs with a sanitized
+   environment. It passes the inbound bearer token once through an inherited
+   pipe, consumes and closes that descriptor, and gives worker processes a
+   strict allowlist environment with `close_fds=True`. A worker can reach the
+   fixed gateway listener but cannot authenticate a recursive `/execute`
+   request and cannot use it to proxy arbitrary destinations.
 
-   - The backend's sensitive endpoints require either a valid session cookie
-     (which the runner does not possess) or a bearer token. Unauthenticated
-     calls from the runner can only hit public health / login / register
-     endpoints, and those are rate-limitable.
-   - CSRF double-submit (P0-3) blocks unsafe operations from clients that
-     cannot read the user's `csrf_token` cookie — which the runner cannot.
-   - Before binding the HTTP socket, the runner self-execs with a sanitized
-     environment. It passes the inbound bearer token once through an inherited
-     pipe, consumes and closes that descriptor, and gives worker processes a
-     strict allowlist environment with `close_fds=True`. The token is therefore
-     absent from `/proc/1/environ`, worker argv/environment, and inherited file
-     descriptors. Seccomp also blocks ptrace and cross-process VM reads.
-
-   **Planned upgrade.** A future hardening pass should either (a) replace the
-   direct HTTP call with a pull-based job queue (Redis/RabbitMQ with ACLs so
-   the runner can only consume from the queue), or (b) install host-level
-   iptables rules to drop `judge-runner → backend:8000` traffic. Tracked as
-   a follow-up under Phase 1.5 continuation.
+   CI submits adversarial Python code that attempts to connect to
+   `backend:8000`; the judge result must be exactly `blocked`.
 10. **Unprivileged submitted code.** Every submitted Python/Node process runs
    as its fresh numeric worker UID, not as the root dispatcher. Combined with
    `no-new-privileges` and the capability drop after `setuid`, this makes
    privilege escalation within the container materially harder.
 11. **No published ports**. The service exposes 8090 only on the internal
-   `judge_net`.
+   `judge_worker_net`.
 
 ## Seccomp profile
 
@@ -164,11 +150,14 @@ Run these from the host after `docker compose up -d judge-runner`:
    docker exec proghub-judge-runner sh -c 'python -c "import urllib.request; urllib.request.urlopen(\"http://example.com\", timeout=2)"'
    ```
    Expected: network failure.
-6. **Full Python and Node smoke tests pass** — run the backend's judge
+6. **No direct backend reachability:** submit code that resolves/connects to
+   `backend:8000`; it must return a DNS or connection failure. CI contains the
+   canonical regression test.
+7. **Full Python and Node smoke tests pass** — run the backend's judge
    integration tests against this container. If any syscall in the denylist
    is in fact needed by the runtime, tests will fail with a clear EPERM
    error; remove the offending syscall from the denylist and document why.
-7. **AppArmor (Linux hosts only):** on Debian/Ubuntu hosts, verify that the
+8. **AppArmor (Linux hosts only):** on Debian/Ubuntu hosts, verify that the
    container is confined by the `docker-default` AppArmor profile:
    ```
    docker inspect --format='{{.AppArmorProfile}}' proghub-judge-runner
@@ -181,6 +170,6 @@ Run these from the host after `docker compose up -d judge-runner`:
 ## If you suspect the seccomp profile is breaking submissions
 
 Temporarily revert to Docker's default by editing the `security_opt:` block
-in `docker-compose.yml` (comment out the `seccomp=...` line) and restart
+in `compose.yml` (comment out the `seccomp=...` line) and restart
 the container. File an issue with the failing submission + the kernel
 syscall trace (capture with `strace -f -c` attached to the runner).

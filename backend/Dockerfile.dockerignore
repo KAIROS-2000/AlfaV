@@ -1,0 +1,20 @@
+# This file applies when backend/Dockerfile is built with repository-root context.
+# Default deny: only runtime backend sources and shared code enter BuildKit.
+*
+!backend/
+!backend/Dockerfile
+!backend/requirements.txt
+!backend/sprite/
+!backend/sprite/**
+!backend/app/
+!backend/app/**
+!backend/run.py
+!backend/entrypoint.sh
+!media/
+media/*
+!media/avatars/
+!media/avatars/**
+!media/frames/
+!media/frames/**
+!shared/
+!shared/**

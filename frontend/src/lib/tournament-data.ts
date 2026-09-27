@@ -63,10 +63,28 @@ interface ZipEntry {
 	localHeaderOffset: number
 }
 
-const TOURNAMENT_PUBLIC_URL = (
-	process.env.TOURNAMENT_YANDEX_PUBLIC_URL ||
+const DEFAULT_DEVELOPMENT_TOURNAMENT_PUBLIC_URL =
 	'https://disk.yandex.ru/i/IXI8UsHbHGdVjw'
-).trim()
+
+function getTournamentPublicUrl() {
+	const configured = process.env.TOURNAMENT_YANDEX_PUBLIC_URL?.trim()
+	if (!configured && process.env.APP_ENV === 'production') {
+		throw new Error('TOURNAMENT_YANDEX_PUBLIC_URL must be set when APP_ENV=production')
+	}
+	const value = configured || DEFAULT_DEVELOPMENT_TOURNAMENT_PUBLIC_URL
+	let parsed: URL
+	try {
+		parsed = new URL(value)
+	} catch {
+		throw new Error('TOURNAMENT_YANDEX_PUBLIC_URL must be a valid URL')
+	}
+	if (parsed.protocol !== 'https:' || !['disk.yandex.ru', 'yadi.sk'].includes(parsed.hostname)) {
+		throw new Error('TOURNAMENT_YANDEX_PUBLIC_URL must use an approved HTTPS Yandex Disk host')
+	}
+	return parsed.toString()
+}
+
+const TOURNAMENT_PUBLIC_URL = getTournamentPublicUrl()
 
 const YANDEX_PUBLIC_RESOURCES_URL =
 	'https://cloud-api.yandex.net/v1/disk/public/resources'

@@ -46,7 +46,7 @@ function LessonCodeEditorFallback() {
 
 	return (
 		<div className={`h-[420px] w-full rounded-[24px] border p-3 ${shellClass}`}>
-			<div
+                                  <div
 				className={`flex h-full items-center justify-center rounded-[20px] text-sm font-medium ${surfaceClass}`}
 			>
 				Загружаем редактор…
@@ -468,7 +468,9 @@ export function LessonPlayer({
 	)
 	const [error, setError] = useState('')
 	const [lessonMissing, setLessonMissing] = useState(false)
-	const [answer, setAnswer] = useState('')
+	const [answer, setAnswer] = useState(
+		normalizedInitialData?.lesson.tasks?.[0]?.starter_code || '',
+	)
 	const [quizAnswers, setQuizAnswers] = useState<Record<string, unknown>>({})
 	const [loadingTask, setLoadingTask] = useState(false)
 	const [loadingQuiz, setLoadingQuiz] = useState(false)
@@ -506,7 +508,7 @@ export function LessonPlayer({
 				const normalized = normalizeLessonPayload(data)
 				setLesson(normalized.lesson)
 				setProgress(normalized.progress)
-				setAnswer('')
+				setAnswer(normalized.lesson.tasks?.[0]?.starter_code || '')
 				setQuizAnswers({})
 				setShownHints(0)
 				setTheoryMarked(normalized.isFinished)
@@ -1192,10 +1194,15 @@ export function LessonPlayer({
 										</button>
 										<button
 											type='button'
-											onClick={() => setAnswer('')}
+											onClick={() => {
+												setAnswer(task.starter_code || '')
+												setJudgeReport(null)
+											}}
 											className='w-full rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 sm:w-auto'
 										>
-											{usesCodeEditor ? 'Очистить код' : 'Очистить ответ'}
+											{usesCodeEditor
+												? 'Вернуть заготовку'
+												: 'Очистить ответ'}
 										</button>
 										<button
 											type='button'
@@ -1280,27 +1287,27 @@ export function LessonPlayer({
 																	</pre>
 																</div>
 															</div>
-															{!item.passed && (
-																<div className='mt-3 grid min-w-0 gap-3 text-xs leading-6 text-slate-600 md:grid-cols-2'>
-																	<div className='min-w-0'>
-																		<p className='font-bold uppercase tracking-[0.14em] text-slate-400'>
-																			Получено
-																		</p>
-																		<pre className='mt-1 block w-full max-w-full overflow-x-auto whitespace-pre-wrap break-words rounded-2xl bg-slate-950 p-3 text-amber-200'>
-																			{item.actual || '(пусто)'}
-																		</pre>
-																	</div>
-																	<div className='min-w-0'>
-																		<p className='font-bold uppercase tracking-[0.14em] text-slate-400'>
-																			Ошибка
-																		</p>
-																		<pre className='mt-1 block w-full max-w-full overflow-x-auto whitespace-pre-wrap break-words rounded-2xl bg-slate-950 p-3 text-rose-200'>
-																			{item.stderr ||
-																				'Нет системной ошибки, просто другой вывод.'}
-																		</pre>
-																	</div>
-																</div>
-															)}
+										<div className='mt-3 grid min-w-0 gap-3 text-xs leading-6 text-slate-600 md:grid-cols-2'>
+											<div className='min-w-0'>
+												<p className='font-bold uppercase tracking-[0.14em] text-slate-400'>
+													Получено
+												</p>
+												<pre className='mt-1 block w-full max-w-full overflow-x-auto whitespace-pre-wrap break-words rounded-2xl bg-slate-950 p-3 text-amber-200'>
+													{item.actual || '(пусто)'}
+												</pre>
+											</div>
+											{!item.passed && (
+												<div className='min-w-0'>
+													<p className='font-bold uppercase tracking-[0.14em] text-slate-400'>
+														Ошибка
+													</p>
+													<pre className='mt-1 block w-full max-w-full overflow-x-auto whitespace-pre-wrap break-words rounded-2xl bg-slate-950 p-3 text-rose-200'>
+														{item.stderr ||
+															'Нет системной ошибки, просто другой вывод.'}
+													</pre>
+												</div>
+											)}
+										</div>
 														</div>
 													))}
 												</div>

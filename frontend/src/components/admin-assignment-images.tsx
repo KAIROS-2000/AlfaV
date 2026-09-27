@@ -8,7 +8,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { api, getApiErrorMessage } from '@/lib/api'
+import { FiveItemPager, SERVER_PAGE_SIZE, useFiveItemWindow } from '@/components/five-item-navigator'
 import { showErrorToast, showSuccessToast } from '@/lib/toast'
+import type { PaginationMeta } from '@/types'
 
 type MediaImage = {
   id: number
@@ -31,9 +33,9 @@ type AssignmentRow = {
   image_url: string | null
 }
 
-type ImageList = { images: MediaImage[]; pagination: { total: number } }
+type ImageList = { images: MediaImage[]; pagination: PaginationMeta }
 
-type AssignmentList = { assignments: AssignmentRow[] }
+type AssignmentList = { assignments: AssignmentRow[]; pagination: PaginationMeta }
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 
@@ -43,27 +45,39 @@ export function AdminAssignmentImages() {
   const [uploadBusy, setUploadBusy] = useState(false)
   const [attachBusyId, setAttachBusyId] = useState<number | null>(null)
   const [loadErr, setLoadErr] = useState('')
+  const [imagesPage, setImagesPage] = useState(1)
+  const [assignmentsPage, setAssignmentsPage] = useState(1)
+  const [imagesPagination, setImagesPagination] = useState<PaginationMeta | null>(null)
+  const [assignmentsPagination, setAssignmentsPagination] = useState<PaginationMeta | null>(null)
+  const [loadingImages, setLoadingImages] = useState(false)
+  const [loadingAssignments, setLoadingAssignments] = useState(false)
+  const imagesWindow = useFiveItemWindow({ items: images, pagination: imagesPagination, loading: loadingImages, onPageChange: setImagesPage })
+  const assignmentsWindow = useFiveItemWindow({ items: assignments, pagination: assignmentsPagination, loading: loadingAssignments, onPageChange: setAssignmentsPage })
 
-  const refreshImages = useCallback(async () => {
+  const refreshImages = useCallback(async (page = imagesPage) => {
+    setLoadingImages(true)
     try {
-      const data = await api<ImageList>('/admin/media/images?page=1&page_size=100', undefined, 'required')
+      const data = await api<ImageList>(`/admin/media/images?page=${page}&page_size=${SERVER_PAGE_SIZE}`, undefined, 'required')
       setImages(data.images || [])
+      setImagesPagination(data.pagination)
     } catch (e) {
       setLoadErr(getApiErrorMessage(e, 'Не удалось загрузить список изображений.'))
-    }
-  }, [])
+    } finally { setLoadingImages(false) }
+  }, [imagesPage])
 
-  const refreshAssignments = useCallback(async () => {
+  const refreshAssignments = useCallback(async (page = assignmentsPage) => {
+    setLoadingAssignments(true)
     try {
       // Re-uses the existing admin overview wiring: assignments are exposed via
       // /api/admin/assignments-light (not yet implemented) -> fallback to /api/admin/overview
       // that returns counts only. To keep this PR focused, we expose a simple list endpoint.
-      const data = await api<AssignmentList>('/admin/assignments-light?page=1&page_size=200', undefined, 'required')
+      const data = await api<AssignmentList>(`/admin/assignments-light?page=${page}&page_size=${SERVER_PAGE_SIZE}`, undefined, 'required')
       setAssignments(data.assignments || [])
+      setAssignmentsPagination(data.pagination)
     } catch (e) {
       setLoadErr(getApiErrorMessage(e, 'Не удалось загрузить список заданий.'))
-    }
-  }, [])
+    } finally { setLoadingAssignments(false) }
+  }, [assignmentsPage])
 
   useEffect(() => {
     void refreshImages()
@@ -152,7 +166,7 @@ export function AdminAssignmentImages() {
         </label>
 
         <ul className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {images.map(image => (
+          {imagesWindow.visibleItems.map(image => (
             <li
               key={image.id}
               className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
@@ -174,13 +188,14 @@ export function AdminAssignmentImages() {
             <li className="text-sm text-slate-500">Пока нет загруженных изображений.</li>
           ) : null}
         </ul>
+        <FiveItemPager window={imagesWindow} loading={loadingImages} itemLabel='изображений' className='mt-4' />
       </section>
 
       <section className="codequest-card p-5 sm:p-6">
         <p className="brand-eyebrow">Привязка</p>
         <h2 className="mt-2 text-lg font-black text-slate-900">Задания и обложки</h2>
         <ul className="mt-5 space-y-3">
-          {assignments.map(assignment => {
+          {assignmentsWindow.visibleItems.map(assignment => {
             const currentImage = assignment.image_id != null ? imagesById.get(assignment.image_id) ?? null : null
             return (
               <li
@@ -216,7 +231,8 @@ export function AdminAssignmentImages() {
                     className="rounded-full border border-slate-200 px-3 py-1.5 text-sm"
                   >
                     <option value="">— без картинки —</option>
-                    {images.map(image => (
+                    {assignment.image_id != null && !imagesWindow.visibleItems.some(image => image.id === assignment.image_id) ? <option value={assignment.image_id}>#{assignment.image_id} (текущая)</option> : null}
+                    {imagesWindow.visibleItems.map(image => (
                       <option key={image.id} value={image.id}>
                         #{image.id} {image.is_generated ? '(авто)' : ''}
                       </option>
@@ -233,6 +249,7 @@ export function AdminAssignmentImages() {
             <li className="text-sm text-slate-500">Заданий пока нет.</li>
           ) : null}
         </ul>
+        <FiveItemPager window={assignmentsWindow} loading={loadingAssignments} itemLabel='заданий' className='mt-4' />
       </section>
     </main>
   )

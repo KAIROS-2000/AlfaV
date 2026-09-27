@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 
+import { AdminAreaShell } from '@/components/admin-area-shell'
 import { NO_INDEX_ROBOTS } from '@/lib/seo'
 
 export const metadata: Metadata = {
@@ -7,5 +8,5 @@ export const metadata: Metadata = {
 }
 
 export default function SuperadminLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return children
+  return <AdminAreaShell area="superadmin">{children}</AdminAreaShell>
 }

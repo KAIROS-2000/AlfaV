@@ -21,7 +21,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from shared.judge import JudgeExecutionRequest, async_execute_stdio_submission, coerce_test_cases
+from shared.judge import (  # noqa: E402 - project root must be available before this import
+    JudgeExecutionRequest,
+    async_execute_stdio_submission,
+    coerce_test_cases,
+)
 
 
 HOST = os.getenv('JUDGE_RUNNER_HOST', '0.0.0.0')
@@ -84,6 +88,13 @@ def _consume_runner_auth_token() -> str:
             with contextlib.suppress(OSError):
                 os.close(fd)
 
+    token_file = (os.getenv('JUDGE_RUNNER_AUTH_TOKEN_FILE') or '').strip()
+    if token_file:
+        try:
+            return Path(token_file).read_text(encoding='utf-8').replace('\r', '').strip()
+        except OSError:
+            return ''
+
     # Imports in unit tests do not go through the exec bootstrap. The actual
     # service always consumes the inherited FD path below before accepting work.
     return (os.getenv('JUDGE_RUNNER_AUTH_TOKEN') or '').strip()
@@ -101,7 +112,12 @@ def _bootstrap_auth_token_for_exec() -> None:
 
     if os.environ.get(_AUTH_TOKEN_FD_ENV):
         return
-    token = (os.getenv('JUDGE_RUNNER_AUTH_TOKEN') or '').strip()
+    token_file = (os.getenv('JUDGE_RUNNER_AUTH_TOKEN_FILE') or '').strip()
+    try:
+        token = Path(token_file).read_text(encoding='utf-8').replace('\r', '').strip() if token_file else ''
+    except OSError:
+        token = ''
+    token = token or (os.getenv('JUDGE_RUNNER_AUTH_TOKEN') or '').strip()
     if not token:
         return
 
@@ -113,6 +129,7 @@ def _bootstrap_auth_token_for_exec() -> None:
     os.set_inheritable(read_fd, True)
     sanitized_env = dict(os.environ)
     sanitized_env.pop('JUDGE_RUNNER_AUTH_TOKEN', None)
+    sanitized_env.pop('JUDGE_RUNNER_AUTH_TOKEN_FILE', None)
     sanitized_env[_AUTH_TOKEN_FD_ENV] = str(read_fd)
     try:
         os.execve(sys.executable, [sys.executable, str(Path(__file__).resolve())], sanitized_env)
@@ -238,10 +255,10 @@ class RunnerRuntime:
         for root, _, files in paths:
             for filename in files:
                 path = os.path.join(root, filename)
-                os.chown(path, execution_uid, execution_uid)
                 os.chmod(path, 0o600)
-            os.chown(root, execution_uid, execution_uid)
+                os.chown(path, execution_uid, execution_uid)
             os.chmod(root, 0o700)
+            os.chown(root, execution_uid, execution_uid)
 
     def cleanup_workspace(self, workdir: str, execution_uid: int) -> None:  # noqa: ARG002
         # A hostile child can call setsid and leave the direct process group.

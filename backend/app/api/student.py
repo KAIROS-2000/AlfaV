@@ -452,8 +452,8 @@ def _user_can_access_lesson(user: User, lesson: Lesson | None) -> bool:
     if not _user_can_access_module(user, lesson.module):
         return False
     if lesson.module.is_custom_classroom_module:
-        return True
-    return bool(lesson.is_published)
+        return bool(lesson.is_published and lesson.archived_at is None)
+    return bool(lesson.is_published and lesson.archived_at is None)
 
 
 def _lesson_payload_for_user(
@@ -757,7 +757,7 @@ def list_modules(current_user: User):
 @student_bp.get("/modules/<int:module_id>/lessons")
 @auth_required()
 def module_lessons(current_user: User, module_id: int):
-    module = Module.query.get_or_404(module_id)
+    module = db.get_or_404(Module, module_id)
     if not _user_can_access_module(current_user, module):
         return {"message": "У вас нет доступа к этому модулю."}, 403
     lessons = []
@@ -840,17 +840,15 @@ def get_lesson(current_user: User, lesson_id: int):
 @student_bp.post("/lessons/<int:lesson_id>/gigachat")
 @auth_required()
 def lesson_gigachat(current_user: User, lesson_id: int):
-    # AUDIT C-08 (open): integration code lives in core/gigachat.py but is intentionally
-    # disabled here. Decide product-side: either delete core/gigachat.py + GIGACHAT_* config,
-    # or re-enable this endpoint AFTER (a) revoking the leaked GIGACHAT_AUTH_KEY at Sber
-    # (audit S-19) and (b) `git filter-repo` removing the historical .env from history.
+    # The external integration has been retired. Keep the legacy route closed so
+    # older clients receive a deterministic response without any provider call.
     return {"message": "GigaChat недоступен в проекте."}, 404
 
 
 @student_bp.patch("/lessons/<int:lesson_id>/complete")
 @auth_required(LESSON_PARTICIPANT_ROLES)
 def complete_lesson(current_user: User, lesson_id: int):
-    lesson = Lesson.query.get_or_404(lesson_id)
+    lesson = db.get_or_404(Lesson, lesson_id)
     if not _user_can_access_lesson(current_user, lesson):
         return {"message": "У вас нет доступа к этому уроку."}, 403
     if (
@@ -931,7 +929,14 @@ def complete_lesson(current_user: User, lesson_id: int):
 
 
 def _learner_safe_judge_feedback(
-    *, mode: str, passed: bool, tests_passed: int, tests_total: int
+    *,
+    mode: str,
+    passed: bool,
+    tests_passed: int,
+    tests_total: int,
+    answer_length: int = 0,
+    minimum_answer_length: int = 0,
+    require_all_keywords: bool = False,
 ) -> str:
     if passed:
         return f"Автопроверка пройдена: {tests_passed}/{tests_total} тестов."
@@ -941,6 +946,16 @@ def _learner_safe_judge_feedback(
             "Проверь решение и попробуй ещё раз."
         )
     if mode == "keywords":
+        if minimum_answer_length > 0 and answer_length < minimum_answer_length:
+            return (
+                f"Сделай ответ подробнее: сейчас {answer_length} символов, "
+                f"нужно не меньше {minimum_answer_length}."
+            )
+        if require_all_keywords and tests_passed < tests_total:
+            return (
+                f"Найдено {tests_passed} из {tests_total} ориентиров. "
+                "Для зачёта нужны все ориентиры."
+            )
         return (
             f"Найдено {tests_passed} из {tests_total} ориентиров. "
             "Проверь ответ и попробуй ещё раз."
@@ -951,7 +966,7 @@ def _learner_safe_judge_feedback(
 def _learner_safe_judge_report(
     report: dict[str, Any], *, validation: dict[str, Any]
 ) -> dict[str, Any]:
-    """Return aggregate grading feedback without exposing private judge data."""
+    """Return aggregate feedback plus per-case details for public sample tests."""
     mode = validation["evaluation_mode"]
     tests_total = _coerce_nonnegative_int(report.get("tests_total"))
     tests_passed = min(
@@ -959,6 +974,32 @@ def _learner_safe_judge_report(
     )
     passed = bool(report.get("passed"))
     score = min(_coerce_nonnegative_int(report.get("score")), 100)
+    answer_length = _coerce_nonnegative_int(report.get("answer_length"))
+    minimum_answer_length = _coerce_nonnegative_int(
+        validation.get("minimum_answer_length")
+    )
+    require_all_keywords = bool(validation.get("require_all_keywords"))
+    public_results = []
+    if mode == "stdin_stdout":
+        tests = validation.get("tests", [])
+        results = report.get("results", [])
+        tests = tests if isinstance(tests, list) else []
+        results = results if isinstance(results, list) else []
+        for test, result in zip(tests, results):
+            if not isinstance(test, dict) or not test.get("is_public") or not isinstance(result, dict):
+                continue
+            public_results.append(
+                {
+                    "label": test.get("label"),
+                    "input": test.get("input"),
+                    "expected": test.get("expected"),
+                    "actual": result.get("actual"),
+                    "stderr": result.get("stderr"),
+                    "passed": result.get("passed"),
+                    "duration_ms": result.get("duration_ms"),
+                    "error_type": result.get("error_type"),
+                }
+            )
     return {
         "mode": mode,
         "runner": "stdin_stdout" if mode == "stdin_stdout" else None,
@@ -970,12 +1011,21 @@ def _learner_safe_judge_report(
             passed=passed,
             tests_passed=tests_passed,
             tests_total=tests_total,
+            answer_length=answer_length,
+            minimum_answer_length=minimum_answer_length,
+            require_all_keywords=require_all_keywords,
         ),
         "tests_passed": tests_passed,
         "tests_total": tests_total,
-        # Per-case data can disclose hidden inputs through input, expected, actual,
-        # stderr, or labels. Learners receive aggregate results only.
-        "results": [],
+        "answer_length": answer_length if mode == "keywords" else None,
+        "minimum_answer_length": (
+            minimum_answer_length if mode == "keywords" else None
+        ),
+        "require_all_keywords": (
+            require_all_keywords if mode == "keywords" else False
+        ),
+        # Only teacher-designated sample tests are safe to show learners.
+        "results": public_results,
         "time_limit_ms": (
             validation.get("time_limit_ms") if mode == "stdin_stdout" else None
         ),
@@ -1033,7 +1083,7 @@ def _compute_task_evaluation(
 @student_bp.post("/tasks/<int:task_id>/submit")
 @auth_required(LESSON_PARTICIPANT_ROLES)
 def submit_task(current_user: User, task_id: int):
-    task = Task.query.get_or_404(task_id)
+    task = db.get_or_404(Task, task_id)
     if not _user_can_access_lesson(current_user, task.lesson):
         return {"message": "У вас нет доступа к этому уроку."}, 403
     if (
@@ -1116,7 +1166,7 @@ def submit_task(current_user: User, task_id: int):
 @student_bp.post("/lessons/<int:lesson_id>/start")
 @auth_required(LESSON_PARTICIPANT_ROLES)
 def start_lesson(current_user: User, lesson_id: int):
-    lesson = Lesson.query.get_or_404(lesson_id)
+    lesson = db.get_or_404(Lesson, lesson_id)
     if not _user_can_access_lesson(current_user, lesson):
         return {"message": "У вас нет доступа к этому уроку."}, 403
     if (
@@ -1134,7 +1184,7 @@ def start_lesson(current_user: User, lesson_id: int):
 @student_bp.post("/lessons/<int:lesson_id>/hints")
 @auth_required(LESSON_PARTICIPANT_ROLES)
 def record_lesson_hints(current_user: User, lesson_id: int):
-    lesson = Lesson.query.get_or_404(lesson_id)
+    lesson = db.get_or_404(Lesson, lesson_id)
     if not _user_can_access_lesson(current_user, lesson):
         return {"message": "У вас нет доступа к этому уроку."}, 403
     if (
@@ -1157,7 +1207,7 @@ def record_lesson_hints(current_user: User, lesson_id: int):
 @student_bp.post("/quizzes/<int:quiz_id>/submit")
 @auth_required(LESSON_PARTICIPANT_ROLES)
 def submit_quiz(current_user: User, quiz_id: int):
-    quiz = Quiz.query.get_or_404(quiz_id)
+    quiz = db.get_or_404(Quiz, quiz_id)
     if not _user_can_access_lesson(current_user, quiz.lesson):
         return {"message": "У вас нет доступа к этому уроку."}, 403
     if (
@@ -1376,7 +1426,7 @@ def my_classes(current_user: User):
 @student_bp.post("/assignments/<int:assignment_id>/submit")
 @auth_required([UserRole.STUDENT])
 def submit_assignment(current_user: User, assignment_id: int):
-    assignment = Assignment.query.get_or_404(assignment_id)
+    assignment = db.get_or_404(Assignment, assignment_id)
     membership = ClassMembership.query.filter_by(
         classroom_id=assignment.classroom_id, student_id=current_user.id
     ).first()

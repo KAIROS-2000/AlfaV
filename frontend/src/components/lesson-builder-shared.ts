@@ -1,4 +1,4 @@
-import type { CodeTaskLanguage } from '@/types'
+import type { CodeTaskLanguage, LessonAuthoringDetail, QuizQuestion } from '@/types'
 
 export type AgeGroup = 'junior' | 'middle' | 'senior'
 export type LessonFormat = 'guided' | 'skills' | 'project' | 'revision'
@@ -9,6 +9,7 @@ export type QuizQuestionType = 'single' | 'multiple' | 'order' | 'match' | 'text
 export interface JudgeTestCase {
   input: string
   expected: string
+  isPublic: boolean
 }
 
 export interface ChoiceOptionDraft {
@@ -77,6 +78,10 @@ export interface LessonBuilderSubmitData {
   title: string
   summary: string
   age_group: AgeGroup
+  content_format: LessonFormat
+  authoring_metadata: {
+    format_note: string
+  }
   duration_minutes: number
   passing_score: number
   theory_text: string
@@ -91,7 +96,7 @@ export interface LessonBuilderSubmitData {
   answer_keywords: string
   starter_code: string
   programming_language: CodeTaskLanguage | null
-  judge_tests: Array<{ label: string; input: string; expected: string }>
+  judge_tests: Array<{ label: string; input: string; expected: string; is_public: boolean }>
   time_limit_ms: number | null
   memory_limit_mb: number | null
   quiz: {
@@ -102,10 +107,45 @@ export interface LessonBuilderSubmitData {
   }
 }
 
+/**
+ * The update contract intentionally mirrors the create builder fields while
+ * grouping practice inside `task`. Both staff APIs accept this normalized
+ * shape, which keeps create and edit behavior from drifting apart.
+ */
+export interface LessonBuilderUpdateData {
+  title: string
+  summary: string
+  content_format: LessonFormat
+  authoring_metadata: {
+    format_note: string
+  }
+  duration_minutes: number
+  passing_score: number
+  theory_text: string
+  key_points: string
+  interactive_steps: string
+  task: {
+    enabled: boolean
+    task_type: 'text' | 'code'
+    title: string
+    prompt: string
+    evaluation_mode: 'manual' | 'keywords' | 'stdin_stdout'
+    language: CodeTaskLanguage | null
+    keywords: string
+    starter_code: string
+    hints: string
+    tests: Array<{ label: string; input: string; expected: string; is_public: boolean }>
+    time_limit_ms: number | null
+    memory_limit_mb: number | null
+  }
+  quiz: LessonBuilderSubmitData['quiz']
+}
+
 export interface CreatedLessonState {
   id: number
   title: string
   summary: string
+  version?: number
 }
 
 export const METHODICAL_SECTIONS = [
@@ -261,11 +301,19 @@ export function parseLines(value: string) {
 }
 
 export function createEmptyTest(): JudgeTestCase {
-  return { input: '', expected: '' }
+  return { input: '', expected: '', isPublic: false }
 }
 
 export function hasCompleteJudgeTest(tests: JudgeTestCase[]) {
-  return tests.some(testCase => testCase.input.trim() && testCase.expected.trim())
+  // Empty stdin is a valid and common test case: many beginner tasks only
+  // write a value to stdout. The expected output is the actual required part.
+  return tests.some(testCase => testCase.expected.trim())
+}
+
+export function isIntegerInRange(value: string, minimum: number, maximum: number) {
+  if (!/^\d+$/.test(value.trim())) return false
+  const numeric = Number(value)
+  return Number.isInteger(numeric) && numeric >= minimum && numeric <= maximum
 }
 
 export function createChoiceOption(): ChoiceOptionDraft {
@@ -330,12 +378,202 @@ export function createInitialLessonBuilderForm(ageGroup: AgeGroup = 'junior'): L
   }
 }
 
+function asLessonFormat(value: string | null | undefined): LessonFormat {
+  return value === 'guided' || value === 'skills' || value === 'project' || value === 'revision'
+    ? value
+    : 'guided'
+}
+
+function asQuizQuestionType(value: string | null | undefined): QuizQuestionType {
+  return value === 'single' || value === 'multiple' || value === 'order' || value === 'match' || value === 'text'
+    ? value
+    : 'single'
+}
+
+function asCodeLanguage(value: string | null | undefined, ageGroup: AgeGroup): CodeTaskLanguage {
+  return value === 'javascript' || value === 'python'
+    ? value
+    : defaultLanguageForAgeGroup(ageGroup)
+}
+
+function listBlockItems(lesson: LessonAuthoringDetail) {
+  const block = lesson.theory_blocks.find(item => item.type === 'list')
+  return Array.isArray(block?.items) ? block.items.filter(item => typeof item === 'string') : []
+}
+
+function theoryText(lesson: LessonAuthoringDetail) {
+  return lesson.theory_blocks
+    .filter(item => item.type !== 'hero' && item.type !== 'list')
+    .map(item => item.text?.trim() || '')
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function mapQuizQuestion(question: QuizQuestion): QuizQuestionDraft {
+  const type = asQuizQuestionType(question.type)
+  const draft = createQuizQuestion(type)
+  const correctValues = Array.isArray(question.correct) ? question.correct : []
+
+  if (type === 'single' || type === 'multiple') {
+    const correctIndexes = new Set(
+      correctValues
+        .map(value => typeof value === 'number' ? value : Number(value))
+        .filter(value => Number.isInteger(value) && value >= 0),
+    )
+    return {
+      ...draft,
+      id: question.id || draft.id,
+      prompt: question.prompt || '',
+      options: (question.options || []).map((text, index) => ({
+        id: createLocalId('option'),
+        text,
+        correct: correctIndexes.has(index),
+      })),
+    }
+  }
+
+  if (type === 'order') {
+    return {
+      ...draft,
+      id: question.id || draft.id,
+      prompt: question.prompt || '',
+      orderItems: (question.items || []).join('\n'),
+      correctOrder: correctValues.map(value => String(value)).join('\n'),
+    }
+  }
+
+  if (type === 'match') {
+    const correct = !Array.isArray(question.correct) && question.correct && typeof question.correct === 'object'
+      ? question.correct
+      : {}
+    const left = question.left || []
+    const right = question.right || []
+    const pairs = left.map((value, index) => ({
+      id: createLocalId('pair'),
+      left: value,
+      right: correct[value] || right[index] || '',
+    }))
+    return {
+      ...draft,
+      id: question.id || draft.id,
+      prompt: question.prompt || '',
+      pairs: pairs.length ? pairs : draft.pairs,
+    }
+  }
+
+  return {
+    ...draft,
+    id: question.id || draft.id,
+    prompt: question.prompt || '',
+    acceptedAnswers: correctValues.map(value => String(value)).join('\n'),
+  }
+}
+
+function persistedDraftForm(lesson: LessonAuthoringDetail): Partial<LessonBuilderForm> | null {
+  const form = lesson.draft_payload?.form
+  return form && typeof form === 'object' ? form as Partial<LessonBuilderForm> : null
+}
+
+function asPracticeFormat(value: unknown): PracticeFormat {
+  return value === 'none' || value === 'text' || value === 'code' ? value : 'text'
+}
+
+function asCheckMode(value: unknown): CheckMode {
+  return value === 'manual' || value === 'keywords' || value === 'tests' ? value : 'manual'
+}
+
+/** Converts the staff authoring response back into the shared builder form. */
+export function lessonAuthoringToForm(lesson: LessonAuthoringDetail): LessonBuilderForm {
+  const ageGroup = normalizeAgeGroup(lesson.module?.age_group)
+  const form = createInitialLessonBuilderForm(ageGroup)
+  const task = lesson.tasks[0]
+  const validation = task?.validation
+  const taskIsCode = task?.task_type === 'code' || validation?.evaluation_mode === 'stdin_stdout'
+  const practiceFormat: PracticeFormat = task
+    ? taskIsCode
+      ? 'code'
+      : 'text'
+    : 'none'
+  const checkMode: CheckMode = taskIsCode
+    ? 'tests'
+    : validation?.evaluation_mode === 'keywords'
+      ? 'keywords'
+      : 'manual'
+  const quiz = lesson.quizzes[0]
+
+  const derived: LessonBuilderForm = {
+    ...form,
+    title: lesson.title || '',
+    ageGroup,
+    duration: String(lesson.duration_minutes || form.duration),
+    summary: lesson.summary || '',
+    passingScore: String(lesson.passing_score ?? form.passingScore),
+    lessonFormat: asLessonFormat(lesson.content_format),
+    formatNote: lesson.authoring_metadata?.format_note || lesson.format_note || '',
+    theoryText: theoryText(lesson),
+    keyPoints: listBlockItems(lesson).join('\n'),
+    interactiveSteps: lesson.interactive_steps
+      .map(step => step.text?.trim() || '')
+      .filter(Boolean)
+      .join('\n'),
+    practiceFormat,
+    taskTitle: task?.title || '',
+    taskPrompt: task?.prompt || '',
+    taskHints: (task?.hints || []).join('\n'),
+    checkMode,
+    answerKeywords: (validation?.keywords || []).join('\n'),
+    programmingLanguage: asCodeLanguage(validation?.language, ageGroup),
+    starterCode: task?.starter_code || '',
+    timeLimitMs: String(validation?.time_limit_ms || form.timeLimitMs),
+    memoryLimitMb: String(validation?.memory_limit_mb || form.memoryLimitMb),
+    judgeTests: (validation?.tests || []).map(test => ({
+      input: test.input || '',
+      expected: test.expected || '',
+      isPublic: Boolean(test.is_public),
+    })).length
+      ? (validation?.tests || []).map(test => ({
+          input: test.input || '',
+          expected: test.expected || '',
+          isPublic: Boolean(test.is_public),
+        }))
+      : form.judgeTests,
+    quizEnabled: Boolean(quiz),
+    quizTitle: quiz?.title || '',
+    quizPassingScore: String(quiz?.passing_score ?? form.quizPassingScore),
+    quizQuestions: (quiz?.questions || []).map(mapQuizQuestion),
+  }
+
+  const draft = persistedDraftForm(lesson)
+  if (!draft) return derived
+
+  // An incomplete draft needs to preserve values that do not yet have a
+  // canonical lesson representation (for example a half-written quiz). Keep
+  // the class/module age group authoritative even when the browser payload is
+  // old, then use the stored form for the remaining authoring fields.
+  return {
+    ...derived,
+    ...draft,
+    ageGroup,
+    lessonFormat: asLessonFormat(draft.lessonFormat),
+    practiceFormat: asPracticeFormat(draft.practiceFormat),
+    checkMode: asCheckMode(draft.checkMode),
+    programmingLanguage: asCodeLanguage(draft.programmingLanguage, ageGroup),
+    judgeTests: Array.isArray(draft.judgeTests) ? draft.judgeTests : derived.judgeTests,
+    quizQuestions: Array.isArray(draft.quizQuestions) ? draft.quizQuestions : derived.quizQuestions,
+  }
+}
+
+export function lessonAuthoringDraftStep(lesson: LessonAuthoringDetail): number {
+  const value = lesson.draft_payload?.current_step
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0
+}
+
 export function foundationComplete(form: LessonBuilderForm) {
   return Boolean(
     form.title.trim()
-    && form.duration.trim()
+    && isIntegerInRange(form.duration, 1, 480)
     && form.summary.trim()
-    && form.passingScore.trim(),
+    && isIntegerInRange(form.passingScore, 0, 100),
   )
 }
 
@@ -493,11 +731,12 @@ export function quizComplete(form: LessonBuilderForm, enabled: boolean) {
 export function buildLessonSubmitData(form: LessonBuilderForm): LessonBuilderSubmitData {
   const judgeTests = form.checkMode === 'tests'
     ? form.judgeTests
-      .filter(item => item.input.trim() && item.expected.trim())
+      .filter(item => item.expected.trim())
       .map((item, index) => ({
         label: `Тест ${index + 1}`,
         input: item.input,
         expected: item.expected,
+        is_public: item.isPublic,
       }))
     : []
   const quizPayload = buildQuizPayload(form)
@@ -515,8 +754,12 @@ export function buildLessonSubmitData(form: LessonBuilderForm): LessonBuilderSub
     title: form.title.trim(),
     summary: form.summary.trim(),
     age_group: form.ageGroup,
-    duration_minutes: Number(form.duration || 45),
-    passing_score: Number(form.passingScore || 70),
+    content_format: form.lessonFormat,
+    authoring_metadata: {
+      format_note: form.formatNote.trim(),
+    },
+    duration_minutes: Number(form.duration),
+    passing_score: Number(form.passingScore),
     theory_text: form.theoryText,
     key_points: form.keyPoints,
     interactive_steps: form.interactiveSteps,
@@ -538,5 +781,38 @@ export function buildLessonSubmitData(form: LessonBuilderForm): LessonBuilderSub
       passing_score: Number(form.quizPassingScore || 70),
       questions: quizPayload.questions,
     },
+  }
+}
+
+export function buildLessonUpdateData(
+  source: LessonBuilderForm | LessonBuilderSubmitData,
+): LessonBuilderUpdateData {
+  const lesson = 'lessonFormat' in source ? buildLessonSubmitData(source) : source
+
+  return {
+    title: lesson.title,
+    summary: lesson.summary,
+    content_format: lesson.content_format,
+    authoring_metadata: lesson.authoring_metadata,
+    duration_minutes: lesson.duration_minutes,
+    passing_score: lesson.passing_score,
+    theory_text: lesson.theory_text,
+    key_points: lesson.key_points,
+    interactive_steps: lesson.interactive_steps,
+    task: {
+      enabled: lesson.practice_enabled,
+      task_type: lesson.task_type,
+      title: lesson.task_title,
+      prompt: lesson.task_prompt,
+      evaluation_mode: lesson.evaluation_mode,
+      language: lesson.programming_language,
+      keywords: lesson.answer_keywords,
+      starter_code: lesson.starter_code,
+      hints: lesson.task_hints,
+      tests: lesson.judge_tests,
+      time_limit_ms: lesson.time_limit_ms,
+      memory_limit_mb: lesson.memory_limit_mb,
+    },
+    quiz: lesson.quiz,
   }
 }
